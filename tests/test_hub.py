@@ -163,6 +163,7 @@ def test_bad_arguments_raise(hub):
 
 
 def test_module_level_notify(tmp_path, capsys):
-    result = notify("从 Python 里调用", "正文", source="script", settings=Settings(home=tmp_path / "hub", channel="console"))
+    settings = Settings(home=tmp_path / "hub", channel="console", quiet_hours="off")  # 用的是真时间，夜里跑测试也要能发
+    result = notify("从 Python 里调用", "正文", source="script", settings=settings)
     assert result.status == "sent"
     assert "从 Python 里调用" in capsys.readouterr().out

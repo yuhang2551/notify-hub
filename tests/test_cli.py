@@ -1,17 +1,34 @@
+import json
 import os
 import stat
+import subprocess
+import sys
+import time
 
 import httpx
+import pytest
 from typer.testing import CliRunner
 
-from notify_hub import cli
+from notify_hub import cli, launchd
 from notify_hub.cli import app, fill_env
 
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def real_clock_is_not_quiet(monkeypatch):
+    """命令行用的是真时间：关掉免打扰和定时汇总，测试在夜里跑结果也一样。要测它们的自己再打开。"""
+    monkeypatch.setenv("NOTIFY_HUB_QUIET_HOURS", "off")
+    monkeypatch.setenv("NOTIFY_HUB_DIGEST_TIME", "off")
+
+
 def _console(monkeypatch):
     monkeypatch.setenv("NOTIFY_HUB_CHANNEL", "console")
+
+
+def _window_around_now() -> str:
+    hour = time.localtime().tm_hour
+    return f"{(hour - 1) % 24:02d}:00-{(hour + 1) % 24:02d}:00"
 
 
 def test_send_prints_and_records(monkeypatch):
@@ -68,7 +85,7 @@ def test_status_and_flush(monkeypatch):
     status = runner.invoke(app, ["status"])
     assert "console" in status.output
     flush = runner.invoke(app, ["flush"])
-    assert flush.exit_code == 0 and "补发 0 条" in flush.output  # 还没到重试时间
+    assert flush.exit_code == 0 and "发出 0 条" in flush.output  # 还没到重试时间
 
 
 def test_bad_config_is_explained(tmp_path, monkeypatch):
@@ -136,3 +153,76 @@ def test_chats_lists_groups(monkeypatch):
 def test_chats_without_credentials():
     result = runner.invoke(app, ["chats"])
     assert result.exit_code == 1 and "LARK_APP_ID" in result.output
+
+
+def test_send_in_quiet_hours_waits(monkeypatch):
+    _console(monkeypatch)
+    monkeypatch.setenv("NOTIFY_HUB_QUIET_HOURS", _window_around_now())
+    result = runner.invoke(app, ["send", "夜里的"])
+    assert result.exit_code == 0 and result.output.startswith("🌙 免打扰时段")
+    assert runner.invoke(app, ["send", "急事", "--level", "urgent"]).output.startswith("────")
+    status = runner.invoke(app, ["status"]).output
+    assert "（现在是免打扰时段）" in status and "等免打扰结束 1" in status
+
+
+def test_digest_command(monkeypatch):
+    _console(monkeypatch)
+    assert "没有等着汇总" in runner.invoke(app, ["digest"]).output
+    runner.invoke(app, ["send", "订阅 12 封", "--level", "digest", "--source", "mail"])
+    preview = runner.invoke(app, ["digest", "--preview"])
+    assert "⚪ 每日汇总 · 1 条" in preview.output and "订阅 12 封" in preview.output and "已推送" not in preview.output
+    sent = runner.invoke(app, ["digest"])
+    assert sent.exit_code == 0 and "⚪ 每日汇总 · 1 条" in sent.output and "✅ 1 条合成一张汇总卡片" in sent.output
+    assert "没有等着汇总" in runner.invoke(app, ["digest"]).output
+    assert "每日汇总：不自动发" in runner.invoke(app, ["status"]).output
+
+
+def test_flush_quiet_prints_only_when_something_happened(monkeypatch):
+    _console(monkeypatch)
+    assert runner.invoke(app, ["flush", "-q"]).output == ""
+
+
+def test_schedule_on_other_systems_prints_a_cron_line(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    result = runner.invoke(app, ["schedule", "install"])
+    assert result.exit_code == 0 and "*/10 * * * *" in result.output and "flush --quiet" in result.output
+
+
+def test_schedule_on_a_mac(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(launchd.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def fake_launchctl(args, **kwargs):
+        calls.append(args[1])
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(launchd.subprocess, "run", fake_launchctl)
+    assert "还没装" in runner.invoke(app, ["schedule"]).output
+    installed = runner.invoke(app, ["schedule", "install"])
+    assert installed.exit_code == 0 and "每 10 分钟" in installed.output, installed.output
+    assert (tmp_path / "Library" / "LaunchAgents" / "com.notify-hub.flush.plist").exists()
+    assert "launchd 已加载" in runner.invoke(app, ["schedule", "status"]).output
+    assert "卸掉了" in runner.invoke(app, ["schedule", "uninstall"]).output
+    assert calls == ["bootout", "bootstrap", "print", "bootout"]
+    assert runner.invoke(app, ["schedule", "restart"]).exit_code == 2
+
+
+def test_claude_hook_command(monkeypatch):
+    _console(monkeypatch)
+    payload = {
+        "hook_event_name": "Notification",
+        "cwd": "/w/notify-hub",
+        "message": "Claude needs your permission to use Bash",
+        "notification_type": "permission_prompt",
+    }
+    result = runner.invoke(app, ["claude-hook"], input=json.dumps(payload))
+    assert result.exit_code == 0 and "🔵 notify-hub · Claude Code 等你确认" in result.output
+
+
+def test_claude_hook_never_fails():
+    assert runner.invoke(app, ["claude-hook"], input="not json").exit_code == 0
+    assert runner.invoke(app, ["claude-hook"], input="").exit_code == 0
+    stop = {"hook_event_name": "Stop", "last_assistant_message": "完成"}
+    assert runner.invoke(app, ["claude-hook"], input=json.dumps(stop)).exit_code == 0  # 没配置 Lark：留在发件箱，也是 0

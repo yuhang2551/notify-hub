@@ -1,4 +1,5 @@
 import os
+import time
 
 import pytest
 
@@ -28,7 +29,7 @@ class FakeChannel:
 
 
 class Clock:
-    def __init__(self, t: float = 1_800_000_000.0):
+    def __init__(self, t: float = 1_800_000_000.0):  # 2027-01-15 12:00（UTC+4）
         self.t = t
 
     def __call__(self) -> float:
@@ -38,13 +39,22 @@ class Clock:
         self.t += seconds
 
 
+# 测试里的时区固定成 UTC+4（没有夏令时），Clock() 的起点是当地中午 12:00
+TEST_TZ = "GST-4"
+
+
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch, tmp_path):
-    """测试不读你真实的 ~/.notify-hub，也不受外面 LARK_ 环境变量影响。"""
+    """测试不读你真实的 ~/.notify-hub，也不受外面 LARK_ 环境变量和本机时区影响。"""
     for name in list(os.environ):
         if name.startswith(("NOTIFY_HUB_", "LARK_")):
             monkeypatch.delenv(name)
     monkeypatch.setenv("NOTIFY_HUB_HOME", str(tmp_path / "hub"))
+    monkeypatch.setenv("TZ", TEST_TZ)
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
 
 
 @pytest.fixture

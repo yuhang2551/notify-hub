@@ -1,15 +1,16 @@
-"""核心：收下一条通知，决定现在发、进汇总还是不发，先写发件箱再发送，失败的留着重发。"""
+"""核心：收下一条通知，决定现在发、等免打扰结束、进汇总还是不发，先写发件箱再发送，失败的留着重发。"""
 from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from .channels import Channel, ChannelError, build_channel
 from .config import Settings, load_settings
 from .models import Level, Message, make_message
 from .store import Outbox, row_to_message
+from .timing import fmt_window, in_window, last_daily, window_end
 
 # 第 n 次失败后隔多久再试（秒）；之后都是一小时一次，直到 give_up_hours 放弃
 BACKOFF = [60, 300, 900, 1800, 3600]
@@ -19,7 +20,7 @@ RATE_WINDOW = 3600
 @dataclass
 class Result:
     id: int | None
-    status: str  # sent | queued（没发出去，留在发件箱等重发）| digest | skipped
+    status: str  # sent | queued（没发出去，留在发件箱等重发）| held（等免打扰结束）| digest | skipped
     detail: str = ""
     network: bool = False  # 失败是因为连不上
 
@@ -30,6 +31,19 @@ class FlushReport:
     failed: int = 0
     gave_up: int = 0
     last_error: str = ""
+    held: int = 0  # 免打扰结束，合成一张卡的条数
+    digest: int = 0  # 进了每日汇总卡片的条数
+
+    def empty(self) -> bool:
+        return not (self.sent or self.failed or self.gave_up or self.held or self.digest)
+
+
+def held_title(count: int) -> str:
+    return f"免打扰期间收到 {count} 条通知"
+
+
+def digest_title(count: int) -> str:
+    return f"每日汇总 · {count} 条"
 
 
 def dedup_key(msg: Message) -> str:
@@ -52,6 +66,8 @@ class Hub:
         self.clock = clock
         self.outbox = outbox or Outbox(self.settings.db_path)
         self._channel = channel
+        # 第一次用的时间：第一份每日汇总在这之后的第一个汇总时刻发
+        self.outbox.meta_init("last_digest_at", repr(self.clock()))
 
     def __enter__(self) -> Hub:
         return self
@@ -68,6 +84,9 @@ class Hub:
         if self._channel is None:
             self._channel = build_channel(self.settings)
         return self._channel
+
+    def is_quiet(self, now: float | None = None) -> bool:
+        return in_window(self.clock() if now is None else now, self.settings.quiet_window)
 
     # ---- 收消息 ----
 
@@ -102,6 +121,12 @@ class Hub:
             mid = self.outbox.add(msg, dedup_key=key_, status="digest", now=now, note=note)
             return Result(mid, "digest", f"{note}，这条进汇总")
 
+        quiet = self.settings.quiet_window
+        if msg.level is Level.NORMAL and quiet and in_window(now, quiet):
+            mid = self.outbox.add(msg, dedup_key=key_, status="held", now=now)
+            until = time.strftime("%H:%M", time.localtime(window_end(now, quiet)))
+            return Result(mid, "held", f"免打扰时段（{fmt_window(quiet)}），{until} 以后和这段时间的其他通知合成一张卡发")
+
         mid = self.outbox.add(msg, dedup_key=key_, status="pending", now=now)
         result = self._deliver(mid)
         if result.status == "sent":
@@ -115,8 +140,9 @@ class Hub:
         if not self.outbox.claim(mid, now):
             return Result(mid, "queued", "别的进程正在发这一条")
         row = self.outbox.get(mid)
+        items = tuple(row_to_message(r) for r in self.outbox.members(mid)) if row["kind"] == "bundle" else ()
         try:
-            self.channel().send(row_to_message(row))
+            self.channel().send(row_to_message(row, items))
         except Exception as exc:  # noqa: BLE001 —— 任何失败都留在发件箱，不让调用方崩
             network = isinstance(exc, ChannelError) and exc.network
             error = str(exc) if isinstance(exc, ChannelError) else f"{exc.__class__.__name__}: {exc}"
@@ -127,9 +153,12 @@ class Hub:
         return Result(mid, "sent")
 
     def flush(self, limit: int = 50) -> FlushReport:
-        """重发到时间的消息；太久发不出去的放弃。连不上 Lark 时停下，剩下的下次再说。"""
+        """补上到时间该做的事：免打扰结束就把攒下的合成一张卡，到了汇总时间就发每日汇总，
+        重发到时间的消息，放弃太久发不出去的。连不上 Lark 时停下，剩下的下次再说。"""
         now = self.clock()
         report = FlushReport(gave_up=self.outbox.give_up_older_than(now - self.settings.give_up_hours * 3600))
+        report.held = self._release_held(now)
+        report.digest = self._digest_if_due(now)
         for mid in self.outbox.due(now, limit):
             result = self._deliver(mid)
             if result.status == "sent":
@@ -140,6 +169,44 @@ class Hub:
             if result.network:
                 break
         return report
+
+    def _release_held(self, now: float) -> int:
+        if self.is_quiet(now):
+            return 0
+        made = self.outbox.make_bundle(status="held", level=Level.NORMAL, title=held_title, now=now)
+        return made[1] if made else 0
+
+    def _digest_if_due(self, now: float) -> int:
+        """每天到了汇总时间（并且不在免打扰时段）发一次。电脑睡着错过了，醒来后补发。"""
+        at = self.settings.digest_at
+        if at is None or self.is_quiet(now):
+            return 0
+        last = self.outbox.meta_get("last_digest_at")
+        if last is not None and float(last) >= last_daily(now, at):
+            return 0  # 这一次的汇总已经发过了
+        if not self.outbox.meta_swap("last_digest_at", last, repr(now)):
+            return 0  # 别的进程刚刚发了
+        made = self.outbox.make_bundle(status="digest", level=Level.DIGEST, title=digest_title, now=now)
+        return made[1] if made else 0
+
+    def digest_now(self) -> Result | None:
+        """不等到点，现在就把等着汇总的合成一张卡发出去。没有要汇总的返回 None。"""
+        made = self.outbox.make_bundle(status="digest", level=Level.DIGEST, title=digest_title, now=self.clock())
+        if made is None:
+            return None
+        result = self._deliver(made[0])
+        return replace(result, detail=result.detail or f"{made[1]} 条合成一张汇总卡片")
+
+    def preview(self, status: str) -> Message | None:
+        """不改发件箱，看看现在合成卡片会是什么样（status 是 digest 或 held）。"""
+        rows = self.outbox.with_status(status)
+        if not rows:
+            return None
+        title, level = (digest_title, Level.DIGEST) if status == "digest" else (held_title, Level.NORMAL)
+        return Message(
+            title=title(len(rows)), level=level, source="notify-hub", created_at=self.clock(),
+            items=tuple(row_to_message(r) for r in rows),
+        )
 
     def send_test(self, text: str = "") -> Message:
         """不进发件箱，直接发一条，用来检查配置。失败抛 ChannelError。"""
@@ -155,6 +222,7 @@ class Hub:
             "counts": self.outbox.counts(),
             "oldest_waiting": self.outbox.oldest_waiting(),
             "problems": self.outbox.recent_problems(),
+            "quiet_now": self.is_quiet(),
         }
 
 

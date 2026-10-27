@@ -1,3 +1,5 @@
+from datetime import time
+
 import pytest
 
 from notify_hub.config import Settings, load_settings
@@ -36,7 +38,16 @@ def test_home_and_env_file_from_environment(tmp_path, monkeypatch):
     assert settings.db_path == home / "outbox.db"
 
 
-@pytest.mark.parametrize(("line", "message"), [("NOTIFY_HUB_CHANNEL=email", "lark 或 console"), ("NOTIFY_HUB_RATE_LIMIT=lots", "整数"), ("NOTIFY_HUB_KEY_HOURS=0", "大于 0")])
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ("NOTIFY_HUB_CHANNEL=email", "lark 或 console"),
+        ("NOTIFY_HUB_RATE_LIMIT=lots", "整数"),
+        ("NOTIFY_HUB_KEY_HOURS=0", "大于 0"),
+        ("NOTIFY_HUB_QUIET_HOURS=23:00", "开始-结束"),
+        ("NOTIFY_HUB_DIGEST_TIME=6pm", "HH:MM"),
+    ],
+)
 def test_bad_values_are_explained(tmp_path, line, message):
     env = tmp_path / ".env"
     env.write_text(line + "\n", encoding="utf-8")
@@ -47,3 +58,14 @@ def test_bad_values_are_explained(tmp_path, line, message):
 def test_missing_lark(tmp_path):
     assert Settings(home=tmp_path).missing_lark() == ["LARK_APP_ID", "LARK_APP_SECRET", "LARK_RECEIVE_ID"]
     assert Settings(home=tmp_path, lark_app_id="a", lark_app_secret="b").missing_lark(need_receiver=False) == []
+
+
+def test_quiet_hours_and_digest_time(tmp_path):
+    defaults = load_settings(tmp_path / "none.env")
+    assert defaults.quiet_window == (time(23), time(8)) and defaults.digest_at == time(18)
+    env = tmp_path / ".env"
+    env.write_text("NOTIFY_HUB_QUIET_HOURS=22:30-7:00\nNOTIFY_HUB_DIGEST_TIME=OFF\n", encoding="utf-8")
+    settings = load_settings(env)
+    assert settings.quiet_window == (time(22, 30), time(7)) and settings.digest_at is None
+    env.write_text("NOTIFY_HUB_QUIET_HOURS=off\n", encoding="utf-8")
+    assert load_settings(env).quiet_window is None

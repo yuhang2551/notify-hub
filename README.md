@@ -11,7 +11,8 @@
 notify-hub（被调用时才运行，不常驻）
   1. 先写进发件箱（SQLite），断网、程序崩了都不丢
   2. 去重、限流：同一件事只推一次，某个程序刷屏就改进汇总
-  3. 渲染成 Lark 卡片发出去，失败的留在发件箱定时重发
+  3. 夜里免打扰：普通消息先存着，早上合成一张卡；不急的每天 18:00 合成一张汇总
+  4. 渲染成 Lark 卡片发出去，失败的留在发件箱定时重发
         │
         ▼
 Lark 应用机器人 → 你的手机
@@ -66,7 +67,7 @@ echo "磁盘只剩 2GB" | notify-hub send "备份失败" --level urgent --source
 |---|---|
 | 标题 | 必填，一行 |
 | `--body` | 正文；写 `-` 就从标准输入读 |
-| `--level` | `urgent`（红色卡片）、`normal`（默认，蓝色）、`digest`（进汇总） |
+| `--level` | `urgent`（红色卡片，夜里也发）、`normal`（默认，蓝色，免打扰时段先存着）、`digest`（进每日汇总） |
 | `--source` | 哪个程序发的，比如 `mail`、`timefence`；用来分组和限流 |
 | `--link` | 卡片上加一个「打开」按钮，按钮上写着网站域名 |
 | `--key` | 去重用：同一个来源、同一个 key，24 小时内只推一次 |
@@ -80,15 +81,65 @@ Python 里直接调用：
 from notify_hub import notify
 
 result = notify("TimeFence 跑完了", "IC 0.031", source="timefence")
-print(result.status)  # sent、queued（没发出去，等重发）、digest 或 skipped（重复）
+print(result.status)  # sent、queued（没发出去，等重发）、held（免打扰时段，等结束）、digest 或 skipped（重复）
 ```
+
+## 免打扰和每日汇总
+
+| 级别 | 平时 | 免打扰时段（默认 23:00–08:00） |
+|---|---|---|
+| `urgent` | 马上发，红色卡片 | 照样马上发 |
+| `normal` | 马上发，蓝色卡片 | 先存着，时段结束后合成一张「免打扰期间收到 N 条通知」，每条带标题、正文开头和按钮 |
+| `digest` | 存着，每天 18:00 按来源合成一张灰色的「每日汇总」 | 也存着；汇总时间落在免打扰时段里，就等时段结束再发 |
+
+被限流的消息也进每日汇总。时间按这台电脑的时区算，都能在 `.env` 里改：`NOTIFY_HUB_QUIET_HOURS=23:00-08:00`（写 `off` 关掉），`NOTIFY_HUB_DIGEST_TIME=18:00`（写 `off` 不自动发）。
+
+合成卡片和到点发汇总，要有人定时叫一下 notify-hub。最省事的是装上定时任务：
+
+```bash
+notify-hub schedule install     # 每 10 分钟跑一次 notify-hub flush；macOS 用 launchd，装在你自己的用户下
+notify-hub schedule             # 看装没装、最近几行日志
+notify-hub schedule uninstall   # 卸掉，配置和发件箱都还在
+```
+
+电脑睡着时不跑，醒来后补上：睡过了 18:00，醒来就发这一天的汇总。不装也行，任何一次 `notify-hub send` 发成功后都会顺手做这些，只是可能晚一些。想马上看汇总：`notify-hub digest --preview` 只在终端里看，`notify-hub digest` 现在就发。
+
+## 接上 Claude Code
+
+Claude Code 等你确认，或者回完话你一分钟没理它时，推到手机。在 `~/.claude/settings.json` 里加上（文件里已经有别的设置的话，把 `hooks` 这一段合并进去）：
+
+```json
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [{ "type": "command", "command": "~/.local/bin/notify-hub claude-hook" }]
+      }
+    ]
+  }
+}
+```
+
+这两种提醒，Claude Code 只在你像是离开了终端时才发，人在电脑前不会被打扰。卡片标题是「项目文件夹 · Claude Code 等你确认」，正文是 Claude Code 的提示。`notify-hub claude-hook` 的退出码永远是 0，推送出了问题也不会打断 Claude Code。
+
+用 `claude -p` 跑无人值守的长任务时，可以只给这一次运行加上 `Stop`：做完时推一条，正文是 Claude 最后一条回复的前 300 字。
+
+```bash
+claude -p "把这批实验跑完" --settings '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"~/.local/bin/notify-hub claude-hook"}]}]}}'
+```
+
+不建议把 `Stop` 写进 `~/.claude/settings.json`：那样交互使用时，Claude 每回一轮就推一条。
 
 ## 其他命令
 
 | 命令 | 作用 |
 |---|---|
-| `notify-hub status` | 看配置和发件箱：发了多少、有没有卡住的、最近的错误 |
-| `notify-hub flush` | 重发到时间的消息，放弃重试超过一天的；适合放进定时任务 |
+| `notify-hub status` | 看配置和发件箱：免打扰和汇总的设置、发了多少、有没有卡住的、最近的错误 |
+| `notify-hub flush` | 补上到时间该做的事：免打扰结束后合成卡片、到点发汇总、重发失败的、放弃重试超过一天的；定时任务跑的就是它 |
+| `notify-hub digest` | 现在就发每日汇总；加 `--preview` 只在终端里看 |
+| `notify-hub schedule` | 查看、装上（`install`）、卸掉（`uninstall`）定时任务 |
+| `notify-hub claude-hook` | 给 Claude Code 的 hooks 用，见上面 |
 | `notify-hub test` | 不经过发件箱，直接发一条测试消息 |
 | `notify-hub chats` | 列出机器人所在的群 |
 | `notify-hub init` | 生成配置文件，已经有了就不动 |
@@ -99,19 +150,21 @@ print(result.status)  # sent、queued（没发出去，等重发）、digest 或
 - **去重**：给了 `--key` 的，同一个 key 24 小时内只推一次；没给的，同一来源、同样的标题和正文 10 分钟内只推一次，防止脚本出 bug 循环刷屏。
 - **限流**：同一来源一小时最多推 20 条，超出的进汇总。
 - **链接只走按钮**：正文按纯文本显示，只有明确传的 `--link` 才变成按钮，按钮上写着网站域名。邮件之类的内容能影响模型写的摘要，这样钓鱼链接没法伪装成按钮。
-- **同时调用也不重复**：每条消息发之前先在数据库里认领，两个程序同时补发也不会把一条发两次。
+- **同时调用也不重复**：每条消息发之前先在数据库里认领，两个程序同时补发也不会把一条发两次。合成卡片在一个写锁事务里做，同时跑也只合出一张。
+- **合成的卡片也不会丢**：它本身就是发件箱里的一条消息，和普通消息一样排队、失败重发。
+- **卡片不会太大**：一张卡片列的条数有上限，内容太多就少列几条，写上「还有 N 条」，保证不超过 Lark 的大小限制。
 
 这些数字都能在 `.env` 里改。
 
 ## 数据和隐私
 
 - 配置和发件箱都在 `~/.notify-hub/`，目录和文件只有你能读。秘密只放在 `.env` 里，不进仓库、不写进日志。
-- 发出去的只有调用方传进来的标题、正文和链接，只发给 Lark。
+- 发出去的只有调用方传进来的标题、正文和链接，只发给 Lark。接 Claude Code 的 `Stop` 时，会带上 Claude 最后一条回复的前 300 字。
 - 不开任何端口，也不常驻，Mac 上没有东西对外暴露。
 
 ## 还没做
 
-`digest` 级别和被限流的消息现在只是存在发件箱里，下一段加上定时汇总；还有夜里免打扰、launchd 定时任务、Claude Code hooks 示例，以及邮件监控改成通过它推送。见 [更新记录](CHANGELOG.md)。
+邮件监控改成通过它推送（下一段）；卡片上的双向按钮，比如点「已处理」传回原来的程序。见 [更新记录](CHANGELOG.md)。
 
 ## 开发
 
@@ -120,4 +173,4 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/python -m pytest -q
 ```
 
-74 个测试，用假的 Lark 接口，不联网。设计说明见 [docs/design.md](docs/design.md)。
+127 个测试，用假的 Lark 接口和假的时钟，不联网。设计说明见 [docs/design.md](docs/design.md)。
