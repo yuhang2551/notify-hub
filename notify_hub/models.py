@@ -32,6 +32,7 @@ class Message:
     key: str | None = None
     created_at: float = 0.0
     id: int | None = None
+    items: tuple[Message, ...] = ()  # 合并卡片（夜里攒下的、每日汇总）里的那些消息
 
 
 def make_message(

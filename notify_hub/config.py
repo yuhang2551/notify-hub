@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, fields
+from datetime import time
 from pathlib import Path
 from typing import Any
 
 from dotenv import dotenv_values
+
+from .timing import Window, parse_daily, parse_window
 
 DEFAULT_HOME = Path.home() / ".notify-hub"
 
@@ -22,6 +25,8 @@ ENV_MAP = {
     "NOTIFY_HUB_DEDUP_MINUTES": "dedup_minutes",
     "NOTIFY_HUB_KEY_HOURS": "key_hours",
     "NOTIFY_HUB_GIVE_UP_HOURS": "give_up_hours",
+    "NOTIFY_HUB_QUIET_HOURS": "quiet_hours",
+    "NOTIFY_HUB_DIGEST_TIME": "digest_time",
 }
 
 # init --from 时从别的 .env（比如邮件监控的）复制过来的项
@@ -43,6 +48,8 @@ class Settings:
     dedup_minutes: int = 10  # 没给 key 时，同样的内容多少分钟内只推一次
     key_hours: int = 24  # 给了 key 时，同一个 key 多少小时内只推一次
     give_up_hours: int = 24  # 发不出去的消息重试多少小时后放弃
+    quiet_hours: str = "23:00-08:00"  # 免打扰时段：normal 先存着，结束后合成一张卡发；off 关掉
+    digest_time: str = "18:00"  # 每天几点发汇总；off 不自动发（还可以手动 notify-hub digest）
 
     @property
     def db_path(self) -> Path:
@@ -51,6 +58,14 @@ class Settings:
     @property
     def env_path(self) -> Path:
         return self.home / ".env"
+
+    @property
+    def quiet_window(self) -> Window | None:
+        return parse_window(self.quiet_hours)
+
+    @property
+    def digest_at(self) -> time | None:
+        return parse_daily(self.digest_time)
 
     def missing_lark(self, *, need_receiver: bool = True) -> list[str]:
         names = ["LARK_APP_ID", "LARK_APP_SECRET"] + (["LARK_RECEIVE_ID"] if need_receiver else [])
@@ -77,6 +92,10 @@ def _coerce(field: str, raw: str) -> Any:
         if value not in CHANNELS:
             raise ValueError(f"只能是 {' 或 '.join(CHANNELS)}")
         return value
+    if field == "quiet_hours":
+        return "off" if parse_window(value) is None else value
+    if field == "digest_time":
+        return "off" if parse_daily(value) is None else value
     if field in _INT_FIELDS:
         try:
             number = int(value)

@@ -6,10 +6,21 @@
 
 ## 下一段
 
-1. 汇总：`digest` 级别和被限流的消息，每天定点（默认 18:00）按来源合成一张卡片发出去。
-2. 夜里免打扰：`normal` 级别在免打扰时段（默认 23:00 到 8:00）先存着，早上合成一条发；`urgent` 照常发。
-3. launchd 定时任务（定时 `flush` 和发汇总），Claude Code hooks 示例（任务做完、等你确认时推到手机）。
-4. 邮件监控改成通过 notify-hub 推送，在 Mac 上实测。
+1. 在 Mac 上验第二段：装上定时任务，看合成卡片（分隔线、多个按钮）在 Lark 里的样子。
+2. 邮件监控改成通过 notify-hub 推送，在 Mac 上实测（在 thunderbird-mail-agent 仓库里单独一个 PR）。
+3. 以后再说：卡片上的双向按钮（点「已处理」「稍后提醒」，结果传回原来的程序）。
+
+## 2026-10-27 · 第二段：免打扰、每日汇总、定时任务、接上 Claude Code
+
+- 免打扰时段（默认 23:00–08:00）：`normal` 先存着，时段结束后合成一张「免打扰期间收到 N 条通知」，每条带标题、正文开头、来源、时间和按钮；`urgent` 照常发。
+- 每日汇总（默认 18:00）：`digest` 级别和被限流的消息按来源合成一张灰色卡片。汇总时间落在免打扰时段里，就等时段结束；电脑睡过了汇总时间，醒来后补发；同一天不会发两次。`notify-hub digest` 现在就发，`--preview` 只在终端里看。
+- 合成的卡片本身也是发件箱里的一条消息，和普通消息一样排队、认领、失败重发；合并在写锁事务里做，两个程序同时跑也只合出一张。
+- `notify-hub schedule install`：装一个每 10 分钟跑一次 `flush` 的 launchd 定时任务，`uninstall` 卸掉，不带参数看状态和日志；不是 macOS 时打印 cron 的写法。`flush --quiet` 只在有事发生时写日志。
+- `notify-hub claude-hook`：接 Claude Code 的 hooks。等你确认、你离开时它在等你回复，推到手机；无人值守的长任务做完时（`Stop`）推一条。退出码永远是 0。
+- 卡片太大时少列几条、写上「还有 N 条」，保证不超过 Lark 30 KB 的上限；发送时自己按 UTF-8 编码，中文不会被转义得更长。
+- 发件箱加了两列（`kind`、`bundle_id`）和一张 `meta` 表；第一段建的库打开时自动升级，已有的消息不动。
+- 127 个测试（新增 53 个）。测试里固定了时区和时钟，夜里跑结果也一样；GitHub Actions 照旧在 Linux 和 macOS 上跑。
+- 还没在真机上验：合成卡片在 Lark 里的样子，和 launchd 定时任务在 Mac 上实际跑起来。
 
 ## 2026-10-27 · 第一段：发送、卡片、发件箱、去重和限流
 
@@ -20,4 +31,4 @@
 - `test`、`chats`、`status`、`flush`、`init`；`init --from` 能从邮件监控的 `.env` 复制 Lark 配置，秘密不用经过你的手。
 - Python 接口：`from notify_hub import notify`。
 - 74 个测试，用假的 Lark 接口，不联网；GitHub Actions 在 Linux（Python 3.10、3.13）和 macOS（Python 3.13）上跑。
-- 还没在真机上跑：卡片格式要用真的 Lark 验一次（`notify-hub test`）。
+- 真机验证（2026-10-27）：在 Mac 上用 uv 装好，`init --from` 复制了邮件监控的 Lark 配置，`notify-hub test` 的卡片发到了 Lark 的「通知」群。

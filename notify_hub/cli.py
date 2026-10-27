@@ -1,6 +1,7 @@
-"""命令行入口：notify-hub send | test | chats | flush | status | init | version"""
+"""命令行入口：notify-hub send | test | chats | flush | digest | status | schedule | claude-hook | init | version"""
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -11,11 +12,12 @@ from pathlib import Path
 import typer
 from dotenv import dotenv_values
 
-from . import __version__
+from . import __version__, claude_hook, launchd, render
 from .channels import ChannelError, LarkChannel, build_channel
-from .config import LARK_KEYS, env_file_path, load_settings
+from .config import LARK_KEYS, Settings, env_file_path, load_settings
 from .hub import Hub
 from .models import Level
+from .timing import fmt_window
 
 app = typer.Typer(
     add_completion=False,
@@ -27,7 +29,9 @@ STATUS_LABEL = {
     "sent": "已发",
     "pending": "等重发",
     "sending": "正在发",
-    "digest": "进汇总",
+    "held": "等免打扰结束",
+    "digest": "等汇总",
+    "bundled": "已合进卡片",
     "skipped": "重复没发",
     "failed": "放弃",
 }
@@ -39,19 +43,23 @@ def main(env: Path | None = typer.Option(None, "--env", help="配置文件，默
         os.environ["NOTIFY_HUB_ENV"] = str(env.expanduser())
 
 
-def _hub() -> Hub:
+def _settings() -> Settings:
     try:
-        return Hub(load_settings())
+        return load_settings()
     except ValueError as exc:
         typer.echo(f"❌ {exc}", err=True)
         raise typer.Exit(1) from None
+
+
+def _hub() -> Hub:
+    return Hub(_settings())
 
 
 @app.command()
 def send(
     title: str = typer.Argument(..., help="标题，一行"),
     body: str = typer.Option("", "--body", "-b", help="正文；写 - 就从标准输入读"),
-    level: str = typer.Option("normal", "--level", "-l", help="urgent（马上发，夜里也发）| normal | digest（进汇总）"),
+    level: str = typer.Option("normal", "--level", "-l", help="urgent（马上发，夜里也发）| normal（免打扰时段先存着）| digest（进每日汇总）"),
     source: str = typer.Option("default", "--source", "-s", help="哪个程序发的，比如 mail、timefence；用来分组和限流"),
     link: str | None = typer.Option(None, "--link", help="卡片上加一个「打开」按钮，只接受 http(s) 网址"),
     key: str | None = typer.Option(None, "--key", help="去重用：同一个 key 24 小时内只推一次"),
@@ -71,6 +79,8 @@ def send(
             typer.echo(f"✅ 已推送（#{result.id}）")
     elif result.status == "queued":
         typer.echo(f"⏳ 没发出去，留在发件箱里，之后自动重发（#{result.id}）：{result.detail}", err=True)
+    elif result.status == "held":
+        typer.echo(f"🌙 {result.detail}（#{result.id}）")
     elif result.status == "digest":
         typer.echo(f"🗂  {result.detail}（#{result.id}）")
     else:
@@ -92,11 +102,7 @@ def test(text: str = typer.Argument("", help="正文，不填用默认的一句"
 @app.command()
 def chats() -> None:
     """列出 Lark 机器人所在的群，拿到 chat_id 填进 LARK_RECEIVE_ID。"""
-    try:
-        settings = load_settings()
-    except ValueError as exc:
-        typer.echo(f"❌ {exc}", err=True)
-        raise typer.Exit(1) from None
+    settings = _settings()
     if settings.channel != "lark":
         settings.channel = "lark"
     try:
@@ -118,16 +124,41 @@ def chats() -> None:
 
 
 @app.command()
-def flush() -> None:
-    """重发到时间的消息，放弃重试太久的。适合放进定时任务。"""
+def flush(quiet: bool = typer.Option(False, "--quiet", "-q", help="没有事可做时不打印（定时任务用）")) -> None:
+    """补上到时间该做的事：免打扰结束后把攒下的合成一张卡，到点发每日汇总，重发失败的，放弃重试太久的。
+    适合放进定时任务（notify-hub schedule install）。"""
     with _hub() as hub:
         report = hub.flush()
-    parts = [f"补发 {report.sent} 条"]
+    if quiet and report.empty():
+        return
+    parts = []
+    if report.held:
+        parts.append(f"免打扰期间的 {report.held} 条合成一张卡")
+    if report.digest:
+        parts.append(f"{report.digest} 条合成每日汇总")
+    parts.append(f"发出 {report.sent} 条")
     if report.failed:
         parts.append(f"还没发出去 {report.failed} 条（{report.last_error}）")
     if report.gave_up:
         parts.append(f"放弃 {report.gave_up} 条")
-    typer.echo("，".join(parts))
+    typer.echo((time.strftime("%m-%d %H:%M ") if quiet else "") + "，".join(parts))
+
+
+@app.command()
+def digest(preview: bool = typer.Option(False, "--preview", help="只在终端看看，不发也不改发件箱")) -> None:
+    """现在就发每日汇总，不等到点。"""
+    with _hub() as hub:
+        if preview:
+            msg = hub.preview("digest")
+            typer.echo(render.text(msg) if msg else "没有等着汇总的消息")
+            return
+        result = hub.digest_now()
+    if result is None:
+        typer.echo("没有等着汇总的消息")
+    elif result.status == "sent":
+        typer.echo(f"✅ {result.detail}")
+    else:
+        typer.echo(f"⏳ 没发出去，留在发件箱里，之后自动重发（#{result.id}）：{result.detail}", err=True)
 
 
 def _ago(seconds: float) -> str:
@@ -156,8 +187,16 @@ def status() -> None:
                 typer.echo(f"渠道：lark（{s.lark_domain}，收件方 {channel.receive_id_type} {s.lark_receive_id[:8]}…）")
                 channel.close()
         info = hub.status()
-        typer.echo(f"发件箱：{s.db_path}")
         counts = info["counts"]
+        window = s.quiet_window
+        if window:
+            typer.echo(f"免打扰：{fmt_window(window)}{'（现在是免打扰时段）' if info['quiet_now'] else ''}")
+        else:
+            typer.echo("免打扰：关")
+        at = s.digest_at
+        when = f"每天 {at:%H:%M}" if at else "不自动发（notify-hub digest 手动发）"
+        typer.echo(f"每日汇总：{when}，等着汇总的 {counts.get('digest', 0)} 条")
+        typer.echo(f"发件箱：{s.db_path}")
         if counts:
             typer.echo("  " + " · ".join(f"{STATUS_LABEL.get(k, k)} {v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1])))
         else:
@@ -221,6 +260,58 @@ def init(
         typer.echo("下一步：notify-hub test")
     else:
         typer.echo("下一步：填上 LARK_APP_ID、LARK_APP_SECRET，用 notify-hub chats 查群 id 填进 LARK_RECEIVE_ID，再运行 notify-hub test")
+
+
+@app.command()
+def schedule(action: str = typer.Argument("status", help="install（装上）| uninstall（卸掉）| status（看状态）")) -> None:
+    """定时任务：每 10 分钟跑一次 flush（补发、免打扰结束后合并、到点发汇总）。macOS 用 launchd，装在你自己的用户下。"""
+    if action not in ("install", "uninstall", "status"):
+        typer.echo(f"❌ 只能是 install、uninstall 或 status，不是 {action!r}", err=True)
+        raise typer.Exit(2)
+    settings = _settings()
+    if sys.platform != "darwin":
+        typer.echo("launchd 只有 macOS 有。其他系统用 crontab -e 加上这一行：")
+        typer.echo(launchd.cron_line(settings))
+        return
+    if action == "install":
+        try:
+            path = launchd.install(settings)
+        except (RuntimeError, OSError) as exc:
+            typer.echo(f"❌ {exc}", err=True)
+            raise typer.Exit(1) from None
+        typer.echo(f"✅ 装好了：每 {launchd.INTERVAL // 60} 分钟跑一次 notify-hub flush（{path}）")
+        typer.echo(f"   日志：{launchd.log_path(settings)}（只记有事发生的时候）")
+        return
+    if action == "uninstall":
+        existed = launchd.uninstall()
+        typer.echo("✅ 卸掉了定时任务，配置和发件箱都还在" if existed else "本来就没装")
+        return
+    path = launchd.plist_path()
+    if not path.exists():
+        typer.echo("⏹  还没装。要装就运行 notify-hub schedule install")
+        return
+    state = "launchd 已加载" if launchd.loaded() else "⚠️ launchd 没加载，再运行一次 notify-hub schedule install"
+    typer.echo(f"✅ 已装：{path}（{state}）")
+    log = launchd.log_path(settings)
+    if log.exists():
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
+        typer.echo(f"—— {log} 最后 {len(lines)} 行 ——")
+        for line in lines:
+            typer.echo(line)
+
+
+@app.command("claude-hook")
+def claude_hook_command() -> None:
+    """给 Claude Code 的 hooks 用：从标准输入读 hook 的 JSON，推一条通知。退出码永远是 0，不会打断 Claude Code。"""
+    try:
+        data = json.loads(sys.stdin.read() or "{}")
+        notice = claude_hook.from_hook(data) if isinstance(data, dict) else None
+        if notice is None:
+            return
+        with Hub(load_settings()) as hub:
+            hub.notify(notice.title, notice.body, source=claude_hook.SOURCE)
+    except Exception as exc:  # noqa: BLE001 —— hook 出错只记一句，不影响 Claude Code
+        typer.echo(f"notify-hub claude-hook：{exc}", err=True)
 
 
 @app.command()

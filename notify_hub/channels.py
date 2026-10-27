@@ -109,15 +109,17 @@ class LarkChannel:
         if not self.receive_id:
             raise ChannelError("没有设置 LARK_RECEIVE_ID（用 notify-hub chats 查群 id）")
         token = self._tenant_token()
+        payload = {
+            "receive_id": self.receive_id,
+            "msg_type": "interactive",
+            "content": json.dumps(render.card(msg), ensure_ascii=False),
+        }
         self._request(
             "POST", "/open-apis/im/v1/messages", "发送消息",
             params={"receive_id_type": self.receive_id_type},
-            headers={"Authorization": f"Bearer {token}"},
-            json={
-                "receive_id": self.receive_id,
-                "msg_type": "interactive",
-                "content": json.dumps(render.card(msg), ensure_ascii=False),
-            },
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"},
+            # 自己编码成 UTF-8：中文不转成 \uXXXX，卡片才不会超过 Lark 30 KB 的上限
+            content=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         )
 
     def list_chats(self) -> list[dict[str, str]]:
