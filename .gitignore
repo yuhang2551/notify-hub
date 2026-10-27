@@ -1,0 +1,17 @@
+# 系统文件
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# 本地配置和数据（秘密只放在 ~/.notify-hub/.env）
+.env
+*.db
+*.db-wal
+*.db-shm
