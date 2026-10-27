@@ -26,7 +26,7 @@ a program calls notify-hub send (or notify() in Python)
         ├─ success → sent; then runs one flush
         └─ failure → back to pending, retried after 1, 5, 15, 30 minutes, then hourly; failed after a day
 
-notify-hub flush (every 10 minutes from the scheduled job, or after any successful send)
+notify-hub flush (from the scheduled job at 08:00, 12:00 and 18:00 every day, or after any successful send)
   ├─ quiet hours are over → every held message is combined into one card
   ├─ digest time has passed, this digest has not gone out, and it is not quiet hours → every digest message is combined into one digest card
   └─ pending messages that are due (including the new cards) are sent; failures are retried as above
@@ -49,6 +49,7 @@ The key decisions:
 | Card size is measured in UTF-8 bytes | Lark caps card messages at 30 KB per request; with a lot of content, a card lists fewer entries and says how many more there are |
 | Plain-text body, links only as buttons | Mail content can sway the summaries a model writes; the button shows the domain, so a phishing link cannot pose as a button |
 | No daemon, no open port | It runs only when called; retries and digests are left to launchd. Nothing on the Mac is exposed |
+| The scheduled job runs only three times a day | Ordinary notifications go out as soon as they arrive; the job is only a backstop: once when quiet hours end, once at the digest time and once at noon for retries, so the background stays quiet. Every 10 minutes was too often |
 | Command line first, Python second | Any language, shell script, scheduled job or Claude Code hook can call it; the mail monitor calls the command too, so the two projects install separately and do not depend on each other |
 
 ## Three levels

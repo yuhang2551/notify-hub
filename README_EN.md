@@ -98,12 +98,14 @@ Rate-limited messages also go into the daily digest. Times follow this computer'
 Something has to wake notify-hub up now and then to send those cards. The easiest way is the scheduled job:
 
 ```bash
-notify-hub schedule install     # runs notify-hub flush every 10 minutes; on macOS through launchd, under your own user
-notify-hub schedule             # whether it is installed, plus the last lines of its log
+notify-hub schedule install     # runs notify-hub flush at 08:00, 12:00 and 18:00 every day; on macOS through launchd, under your own user
+notify-hub schedule             # whether it is installed, at what times, plus the last lines of its log
 notify-hub schedule uninstall   # removes it; the config and the outbox stay
 ```
 
-It does not run while the computer sleeps and catches up when it wakes: sleep through 18:00 and the day's digest goes out after you wake it. You can skip the job, too: every successful `notify-hub send` does the same catching up, only perhaps later. To see the digest right away, `notify-hub digest --preview` prints it in the terminal and `notify-hub digest` sends it now.
+At 08:00 quiet hours end and the night's notifications go out as one card; at 18:00 the daily digest goes out; the noon run resends anything that failed earlier. Ordinary notifications are sent as soon as they arrive and never wait for the job. The times can be changed in `.env`, for example `NOTIFY_HUB_SCHEDULE_TIMES=08:00,18:00`; run `notify-hub schedule install` again afterwards. If you move quiet hours or the digest time, add the new times as well; `schedule install` warns you when they do not match.
+
+A run missed while the computer sleeps happens once after it wakes: sleep through 18:00 and the day's digest goes out after you wake it; a run missed while it is off happens after you log in. You can skip the job, too: every successful `notify-hub send` does the same catching up, only perhaps later. To see the digest right away, `notify-hub digest --preview` prints it in the terminal and `notify-hub digest` sends it now.
 
 ## Claude Code
 
