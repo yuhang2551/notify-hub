@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import stat
 import subprocess
 import sys
@@ -182,10 +183,11 @@ def test_flush_quiet_prints_only_when_something_happened(monkeypatch):
     assert runner.invoke(app, ["flush", "-q"]).output == ""
 
 
-def test_schedule_on_other_systems_prints_a_cron_line(monkeypatch):
+def test_schedule_on_other_systems_prints_cron_lines(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     result = runner.invoke(app, ["schedule", "install"])
-    assert result.exit_code == 0 and "*/10 * * * *" in result.output and "flush --quiet" in result.output
+    assert result.exit_code == 0 and "0 8,12,18 * * *" in result.output and "flush --quiet" in result.output
+    assert "每天 08:00、12:00、18:00" in result.output
 
 
 def test_schedule_on_a_mac(monkeypatch, tmp_path):
@@ -201,12 +203,37 @@ def test_schedule_on_a_mac(monkeypatch, tmp_path):
     monkeypatch.setattr(launchd.subprocess, "run", fake_launchctl)
     assert "还没装" in runner.invoke(app, ["schedule"]).output
     installed = runner.invoke(app, ["schedule", "install"])
-    assert installed.exit_code == 0 and "每 10 分钟" in installed.output, installed.output
-    assert (tmp_path / "Library" / "LaunchAgents" / "com.notify-hub.flush.plist").exists()
-    assert "launchd 已加载" in runner.invoke(app, ["schedule", "status"]).output
+    assert installed.exit_code == 0 and "每天 08:00、12:00、18:00 运行" in installed.output, installed.output
+    assert "⚠️" not in installed.output
+    plist = tmp_path / "Library" / "LaunchAgents" / "com.notify-hub.flush.plist"
+    assert plist.exists()
+    status = runner.invoke(app, ["schedule", "status"]).output
+    assert "已装：每天 08:00、12:00、18:00（launchd 已加载）" in status and "不一样" not in status
     assert "卸掉了" in runner.invoke(app, ["schedule", "uninstall"]).output
     assert calls == ["bootout", "bootstrap", "print", "bootout"]
     assert runner.invoke(app, ["schedule", "restart"]).exit_code == 2
+
+
+def test_schedule_status_spots_an_old_install(monkeypatch, tmp_path):
+    """0.2.0 装的是每 10 分钟一次：升级后看状态会提示重装。"""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(launchd.subprocess, "run", lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""))
+    plist = launchd.plist_path()
+    plist.parent.mkdir(parents=True)
+    plist.write_bytes(plistlib.dumps({"Label": launchd.LABEL, "StartInterval": 600}))
+    status = runner.invoke(app, ["schedule"]).output
+    assert "已装：每 10 分钟" in status and "现在的配置是每天 08:00、12:00、18:00" in status
+    assert "再运行一次 notify-hub schedule install" in status
+
+
+def test_schedule_install_warns_when_the_digest_would_be_late(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("NOTIFY_HUB_DIGEST_TIME", "21:00")
+    monkeypatch.setattr(launchd.subprocess, "run", lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""))
+    installed = runner.invoke(app, ["schedule", "install"])
+    assert installed.exit_code == 0 and "每日汇总是 21:00" in installed.output and "NOTIFY_HUB_SCHEDULE_TIMES" in installed.output
 
 
 def test_claude_hook_command(monkeypatch):

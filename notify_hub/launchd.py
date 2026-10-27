@@ -1,7 +1,8 @@
-"""macOS 定时任务（launchd）：每 10 分钟运行一次 notify-hub flush。
+"""macOS 定时任务（launchd）：每天在固定的几个时间运行 notify-hub flush，默认 08:00、12:00、18:00。
 
-flush 会补发失败的消息、免打扰结束后把攒下的合成一张卡、到点发每日汇总。
-电脑睡着时不运行，醒来后 launchd 会补跑，所以不会漏。
+08:00 免打扰结束，把夜里攒下的合成一张卡发出去；18:00 发每日汇总；中午那次补发之前没发出去的。
+平常的通知来了就发，不等定时任务；定时任务只是兜底，任何一次推送成功后也会顺手做这些。
+电脑睡着错过了，醒来后 launchd 补跑一次（错过几次也只补一次）；关机错过了，开机登录后补跑。
 """
 from __future__ import annotations
 
@@ -16,9 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .timing import fmt_times
 
 LABEL = "com.notify-hub.flush"
-INTERVAL = 600  # 秒
 
 Run = Callable[..., subprocess.CompletedProcess]
 
@@ -40,7 +41,11 @@ def plist_path(directory: Path | None = None) -> Path:
     return (directory or agents_dir()) / f"{LABEL}.plist"
 
 
-def plist(settings: Settings, *, interval: int = INTERVAL) -> dict[str, Any]:
+def describe(settings: Settings) -> str:
+    return f"每天 {fmt_times(settings.schedule_at)}"
+
+
+def plist(settings: Settings) -> dict[str, Any]:
     env = {"PYTHONUTF8": "1", "NOTIFY_HUB_HOME": str(settings.home)}
     if os.environ.get("NOTIFY_HUB_ENV"):  # 用 --env 指定过配置文件的，定时任务也用同一个
         env["NOTIFY_HUB_ENV"] = os.environ["NOTIFY_HUB_ENV"]
@@ -48,8 +53,8 @@ def plist(settings: Settings, *, interval: int = INTERVAL) -> dict[str, Any]:
     return {
         "Label": LABEL,
         "ProgramArguments": program_args(),
-        "StartInterval": interval,
-        "RunAtLoad": True,
+        "StartCalendarInterval": [{"Hour": t.hour, "Minute": t.minute} for t in settings.schedule_at],
+        "RunAtLoad": True,  # 装上和开机登录时各跑一次，补上关机时错过的
         "ProcessType": "Background",
         "StandardOutPath": log,
         "StandardErrorPath": log,
@@ -57,12 +62,40 @@ def plist(settings: Settings, *, interval: int = INTERVAL) -> dict[str, Any]:
     }
 
 
+def installed(directory: Path | None = None) -> str | None:
+    """装好的 plist 里写的是什么时间，写法和 describe 一样，方便比较；没装返回 None。"""
+    path = plist_path(directory)
+    if not path.exists():
+        return None
+    data = plistlib.loads(path.read_bytes())
+    entries = data.get("StartCalendarInterval")
+    if isinstance(entries, dict):
+        entries = [entries]
+    if entries:
+        return "每天 " + "、".join(f"{e.get('Hour', 0):02d}:{e.get('Minute', 0):02d}" for e in entries)
+    if data.get("StartInterval"):  # 0.2.0 装的是每 10 分钟一次
+        return f"每 {data['StartInterval'] // 60} 分钟"
+    return "没写时间"
+
+
+def late_cards(settings: Settings) -> list[str]:
+    """免打扰结束、每日汇总这两个时刻定时任务不跑的话，对应的卡片会晚到下一次运行。"""
+    times = settings.schedule_at
+    notes = []
+    window = settings.quiet_window
+    if window and window[1] not in times:
+        notes.append(f"免打扰 {window[1]:%H:%M} 结束，定时任务那时不跑，夜里攒的卡片会晚到下一次运行")
+    if settings.digest_at and settings.digest_at not in times:
+        notes.append(f"每日汇总是 {settings.digest_at:%H:%M}，定时任务那时不跑，汇总会晚到下一次运行")
+    return notes
+
+
 def _domain() -> str:
     return f"gui/{os.getuid()}"
 
 
 def install(settings: Settings, *, directory: Path | None = None, run: Run | None = None) -> Path:
-    """写 plist 并让 launchd 加载；装过的先卸下再装，改了间隔或路径也能重装。"""
+    """写 plist 并让 launchd 加载；装过的先卸下再装，改了时间或路径也能重装。"""
     run = run or subprocess.run
     path = plist_path(directory)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +131,10 @@ def loaded(*, run: Run | None = None) -> bool:
     return result.returncode == 0
 
 
-def cron_line(settings: Settings) -> str:
-    """不是 macOS 时用 cron：每 10 分钟一次。"""
-    return f"*/10 * * * * {shlex.join(program_args())} >> {shlex.quote(str(log_path(settings)))} 2>&1"
+def cron_lines(settings: Settings) -> list[str]:
+    """不是 macOS 时用 cron，时间一样，分钟相同的写成一行。cron 不补跑关机时错过的。"""
+    command = f"{shlex.join(program_args())} >> {shlex.quote(str(log_path(settings)))} 2>&1"
+    hours: dict[int, list[int]] = {}
+    for t in settings.schedule_at:
+        hours.setdefault(t.minute, []).append(t.hour)
+    return [f"{minute} {','.join(map(str, hs))} * * * {command}" for minute, hs in sorted(hours.items())]

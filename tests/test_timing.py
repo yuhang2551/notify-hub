@@ -2,7 +2,17 @@ from datetime import time as dtime
 
 import pytest
 
-from notify_hub.timing import fmt_window, in_window, last_daily, parse_clock, parse_daily, parse_window, window_end
+from notify_hub.timing import (
+    fmt_times,
+    fmt_window,
+    in_window,
+    last_daily,
+    parse_clock,
+    parse_daily,
+    parse_times,
+    parse_window,
+    window_end,
+)
 
 NOON = 1_800_000_000.0  # 2027-01-15 12:00（测试时区 UTC+4）
 HOUR = 3600
@@ -20,6 +30,15 @@ def test_parse():
 def test_bad_windows(bad):
     with pytest.raises(ValueError):
         parse_window(bad)
+
+
+def test_parse_times():
+    assert parse_times("08:00,12:00,18:00") == [dtime(8), dtime(12), dtime(18)]
+    assert parse_times(" 18:00 8:00，12:00, 8:00 ") == [dtime(8), dtime(12), dtime(18)]  # 排序、去重
+    assert fmt_times(parse_times("7:30,21:00")) == "07:30、21:00"
+    for bad in ["", " , ", "noon", "08:00,25:00"]:
+        with pytest.raises(ValueError):
+            parse_times(bad)
 
 
 def test_window_across_midnight():

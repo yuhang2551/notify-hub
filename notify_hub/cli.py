@@ -264,14 +264,17 @@ def init(
 
 @app.command()
 def schedule(action: str = typer.Argument("status", help="install（装上）| uninstall（卸掉）| status（看状态）")) -> None:
-    """定时任务：每 10 分钟跑一次 flush（补发、免打扰结束后合并、到点发汇总）。macOS 用 launchd，装在你自己的用户下。"""
+    """定时任务：每天固定几个时间跑一次 flush（默认 08:00、12:00、18:00），免打扰结束后合并、到点发汇总、补发。macOS 用 launchd，装在你自己的用户下。"""
     if action not in ("install", "uninstall", "status"):
         typer.echo(f"❌ 只能是 install、uninstall 或 status，不是 {action!r}", err=True)
         raise typer.Exit(2)
     settings = _settings()
+    wanted = launchd.describe(settings)
     if sys.platform != "darwin":
-        typer.echo("launchd 只有 macOS 有。其他系统用 crontab -e 加上这一行：")
-        typer.echo(launchd.cron_line(settings))
+        typer.echo(f"launchd 只有 macOS 有。其他系统用 crontab -e 加上下面的内容（{wanted}）：")
+        for line in launchd.cron_lines(settings):
+            typer.echo(line)
+        _late_cards(settings)
         return
     if action == "install":
         try:
@@ -279,25 +282,39 @@ def schedule(action: str = typer.Argument("status", help="install（装上）| u
         except (RuntimeError, OSError) as exc:
             typer.echo(f"❌ {exc}", err=True)
             raise typer.Exit(1) from None
-        typer.echo(f"✅ 装好了：每 {launchd.INTERVAL // 60} 分钟跑一次 notify-hub flush（{path}）")
+        typer.echo(f"✅ 装好了：{wanted} 运行 notify-hub flush（{path}）")
         typer.echo(f"   日志：{launchd.log_path(settings)}（只记有事发生的时候）")
+        _late_cards(settings)
         return
     if action == "uninstall":
         existed = launchd.uninstall()
         typer.echo("✅ 卸掉了定时任务，配置和发件箱都还在" if existed else "本来就没装")
         return
-    path = launchd.plist_path()
-    if not path.exists():
-        typer.echo("⏹  还没装。要装就运行 notify-hub schedule install")
+    current = launchd.installed()
+    if current is None:
+        typer.echo(f"⏹  还没装。要装就运行 notify-hub schedule install（会在{wanted} 运行）")
         return
-    state = "launchd 已加载" if launchd.loaded() else "⚠️ launchd 没加载，再运行一次 notify-hub schedule install"
-    typer.echo(f"✅ 已装：{path}（{state}）")
+    is_loaded = launchd.loaded()
+    typer.echo(f"✅ 已装：{current}" + ("（launchd 已加载）" if is_loaded else ""))
+    typer.echo(f"   {launchd.plist_path()}")
+    if not is_loaded:
+        typer.echo("⚠️ launchd 没加载，再运行一次 notify-hub schedule install")
+    elif current != wanted:
+        typer.echo(f"⚠️ 现在的配置是{wanted}，和装的不一样，再运行一次 notify-hub schedule install 就改过来了")
     log = launchd.log_path(settings)
     if log.exists():
         lines = log.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
         typer.echo(f"—— {log} 最后 {len(lines)} 行 ——")
         for line in lines:
             typer.echo(line)
+
+
+def _late_cards(settings: Settings) -> None:
+    notes = launchd.late_cards(settings)
+    for note in notes:
+        typer.echo(f"⚠️ {note}")
+    if notes:
+        typer.echo("   要准点，就把上面的时间加进 .env 里的 NOTIFY_HUB_SCHEDULE_TIMES，再运行一次 notify-hub schedule install")
 
 
 @app.command("claude-hook")

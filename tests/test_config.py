@@ -46,6 +46,7 @@ def test_home_and_env_file_from_environment(tmp_path, monkeypatch):
         ("NOTIFY_HUB_KEY_HOURS=0", "大于 0"),
         ("NOTIFY_HUB_QUIET_HOURS=23:00", "开始-结束"),
         ("NOTIFY_HUB_DIGEST_TIME=6pm", "HH:MM"),
+        ("NOTIFY_HUB_SCHEDULE_TIMES=noon", "HH:MM"),
     ],
 )
 def test_bad_values_are_explained(tmp_path, line, message):
@@ -69,3 +70,10 @@ def test_quiet_hours_and_digest_time(tmp_path):
     assert settings.quiet_window == (time(22, 30), time(7)) and settings.digest_at is None
     env.write_text("NOTIFY_HUB_QUIET_HOURS=off\n", encoding="utf-8")
     assert load_settings(env).quiet_window is None
+
+
+def test_schedule_times(tmp_path):
+    assert load_settings(tmp_path / "none.env").schedule_at == [time(8), time(12), time(18)]
+    env = tmp_path / ".env"
+    env.write_text("NOTIFY_HUB_SCHEDULE_TIMES=21:00, 7:30\n", encoding="utf-8")
+    assert load_settings(env).schedule_at == [time(7, 30), time(21)]

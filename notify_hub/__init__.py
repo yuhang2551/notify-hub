@@ -2,5 +2,5 @@
 from .hub import Hub, Result, notify
 from .models import Level
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = ["Hub", "Level", "Result", "notify", "__version__"]

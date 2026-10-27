@@ -97,12 +97,14 @@ print(result.status)  # sent、queued（没发出去，等重发）、held（免
 合成卡片和到点发汇总，要有人定时叫一下 notify-hub。最省事的是装上定时任务：
 
 ```bash
-notify-hub schedule install     # 每 10 分钟跑一次 notify-hub flush；macOS 用 launchd，装在你自己的用户下
-notify-hub schedule             # 看装没装、最近几行日志
+notify-hub schedule install     # 每天 08:00、12:00、18:00 各跑一次 notify-hub flush；macOS 用 launchd，装在你自己的用户下
+notify-hub schedule             # 看装没装、装的是什么时间、最近几行日志
 notify-hub schedule uninstall   # 卸掉，配置和发件箱都还在
 ```
 
-电脑睡着时不跑，醒来后补上：睡过了 18:00，醒来就发这一天的汇总。不装也行，任何一次 `notify-hub send` 发成功后都会顺手做这些，只是可能晚一些。想马上看汇总：`notify-hub digest --preview` 只在终端里看，`notify-hub digest` 现在就发。
+08:00 免打扰结束，把夜里攒下的合成一张卡发出去；18:00 发每日汇总；中午那次补发之前没发出去的。平常的通知来了就发，不等定时任务。时间能在 `.env` 里改，比如 `NOTIFY_HUB_SCHEDULE_TIMES=08:00,18:00`，改完再运行一次 `notify-hub schedule install`。改了免打扰或汇总的时间，也把新的时间写进去；`schedule install` 发现对不上会提醒。
+
+电脑睡着错过了，醒来后补跑一次：睡过了 18:00，醒来就发这一天的汇总；关机错过了，开机登录后补跑。不装也行，任何一次 `notify-hub send` 发成功后都会顺手做这些，只是可能晚一些。想马上看汇总：`notify-hub digest --preview` 只在终端里看，`notify-hub digest` 现在就发。
 
 ## 接上 Claude Code
 

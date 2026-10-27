@@ -36,6 +36,14 @@ def parse_daily(text: str) -> time | None:
     return parse_clock(text)
 
 
+def parse_times(text: str) -> list[time]:
+    """'08:00,12:00,18:00' → [08:00, 12:00, 18:00]，排好序、去掉重复；逗号或空格隔开都行。"""
+    parts = [part for part in re.split(r"[\s,，、]+", text.strip()) if part]
+    if not parts:
+        raise ValueError("至少写一个时间，比如 08:00,12:00,18:00")
+    return sorted({parse_clock(part) for part in parts})
+
+
 def in_window(ts: float, window: Window | None) -> bool:
     if window is None:
         return False
@@ -66,3 +74,7 @@ def last_daily(ts: float, at: time) -> float:
 
 def fmt_window(window: Window) -> str:
     return f"{window[0]:%H:%M}–{window[1]:%H:%M}"
+
+
+def fmt_times(times: list[time]) -> str:
+    return "、".join(f"{t:%H:%M}" for t in times)
