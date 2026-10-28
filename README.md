@@ -2,17 +2,19 @@
 
 **中文** | [English](README_EN.md)
 
-本机通知网关。你电脑上的任何程序（邮件监控、实验脚本、定时任务、Claude Code）想通知你，都调用同一个命令，由它推到手机上的 Lark。分级、去重、限流、失败重发这些规则只写一次，每个程序不用各写一遍。
+把通知推到手机上的 Lark。你电脑上的任何程序（邮件监控、实验脚本、Claude Code）想通知你，都调用同一个命令；Lark 的凭证、卡片的样子、连不上时的重试只写一次，每个程序不用各写一遍。
+
+它只管「现在发出去」：调用一次发一次，连不上就当场重试几次，还发不出去就报错退出。什么时候发、夜里发不发、几条合成一张汇总、发不出去的怎么办，都由调用它的程序决定。
 
 ```
-邮件监控 / 实验脚本 / 定时任务 / Claude Code
+邮件监控 / 实验脚本 / Claude Code
         │  notify-hub send "标题" --level urgent --source mail
         ▼
-notify-hub（被调用时才运行，不常驻）
-  1. 先写进发件箱（SQLite），断网、程序崩了都不丢
-  2. 去重、限流：同一件事只推一次，某个程序刷屏就改进汇总
-  3. 夜里免打扰：普通消息先存着，早上合成一张卡；不急的每天 18:00 合成一张汇总
-  4. 渲染成 Lark 卡片发出去，失败的留在发件箱定时重发
+notify-hub（被调用时才运行，发完就退出）
+  1. 检查参数：标题、级别、链接
+  2. 渲染成 Lark 卡片发出去
+  3. 连不上或 Lark 一时出错：隔 2 秒、5 秒各重试一次
+  4. 发出去了，退出码 0；还是不行，退出码 1，原因写在错误输出里
         │
         ▼
 Lark 应用机器人 → 你的手机
@@ -38,13 +40,15 @@ uv tool install git+https://github.com/yuhang2551/notify-hub
 4. 版本管理与发布 → 创建版本并发布，可用范围包括你自己。
 5. 在 Lark 里建一个群（只有你自己也行），群设置 → 群机器人 → 添加这个应用的机器人。
 
-然后：
+然后依次运行：
 
 ```bash
-notify-hub init          # 生成 ~/.notify-hub/.env（只有你能读），填上 App ID 和 App Secret
-notify-hub chats         # 列出机器人所在的群和 chat_id，填进 LARK_RECEIVE_ID
-notify-hub test          # 发一条测试消息，手机上收到就通了
+notify-hub init
+notify-hub chats
+notify-hub test
 ```
+
+`init` 生成 `~/.notify-hub/.env`（只有你能读），在里面填上 App ID 和 App Secret；`chats` 列出机器人所在的群和 chat_id，把要推送的那个填进 `LARK_RECEIVE_ID`；`test` 发一条测试消息，手机上收到就通了。
 
 已经给 [邮件监控](https://github.com/yuhang2551/thunderbird-mail-agent/tree/main/monitor) 配过 Lark 的话，一步复制过来，秘密不用经过你的手：
 
@@ -67,44 +71,61 @@ echo "磁盘只剩 2GB" | notify-hub send "备份失败" --level urgent --source
 |---|---|
 | 标题 | 必填，一行 |
 | `--body` | 正文；写 `-` 就从标准输入读 |
-| `--level` | `urgent`（红色卡片，夜里也发）、`normal`（默认，蓝色，免打扰时段先存着）、`digest`（进每日汇总） |
-| `--source` | 哪个程序发的，比如 `mail`、`timefence`；用来分组和限流 |
+| `--level` | `urgent`（红色卡片）或 `normal`（默认，蓝色卡片）。只决定卡片的颜色，两种都是马上发 |
+| `--source` | 哪个程序发的，比如 `mail`、`timefence`，写在卡片底部 |
 | `--link` | 卡片上加一个「打开」按钮，按钮上写着网站域名 |
-| `--key` | 去重用：同一个来源、同一个 key，24 小时内只推一次 |
 | `--quiet` | 推送成功时不打印 |
 
-推送失败不算出错：消息留在发件箱里，之后自动重发，命令的退出码仍然是 0，调用它的程序不会因为推送失败而中断。只有参数写错时退出码是 2。
+| 退出码 | 意思 | 调用方可以怎么办 |
+|---|---|---|
+| 0 | 发出去了 | |
+| 1 | 没发出去：配置不对、连不上、Lark 拒收。原因写在错误输出里 | 自己决定，比如邮件监控把这封邮件留到下一次汇总 |
+| 2 | 参数写错了：级别不是 `urgent` 或 `normal`、链接不是 http(s) 网址、来源带空格 | 改调用的代码 |
+
+连不上 Lark、Lark 返回 5xx 或 429 时，隔 2 秒、5 秒各再试一次，一共最多 3 次；凭证不对、没权限、收件方写错这类错误，重试也没用，直接退出。每个请求最多等 10 秒，所以发不出去时，命令可能要几十秒才返回。
 
 Python 里直接调用：
 
 ```python
-from notify_hub import notify
+from notify_hub import ChannelError, notify
 
-result = notify("TimeFence 跑完了", "IC 0.031", source="timefence")
-print(result.status)  # sent、queued（没发出去，等重发）、held（免打扰时段，等结束）、digest 或 skipped（重复）
+try:
+    notify("TimeFence 跑完了", "IC 0.031", source="timefence")
+except ChannelError as exc:
+    print(f"没发出去：{exc}")
 ```
 
-## 免打扰和每日汇总
+`notify()` 返回试了几次；参数写错时抛 `ValueError`。
 
-| 级别 | 平时 | 免打扰时段（默认 23:00–08:00） |
-|---|---|---|
-| `urgent` | 马上发，红色卡片 | 照样马上发 |
-| `normal` | 马上发，蓝色卡片 | 先存着，时段结束后合成一张「免打扰期间收到 N 条通知」，每条带标题、正文开头和按钮 |
-| `digest` | 存着，每天 18:00 按来源合成一张灰色的「每日汇总」 | 也存着；汇总时间落在免打扰时段里，就等时段结束再发 |
+## 时间由调用方决定
 
-被限流的消息也进每日汇总。时间按这台电脑的时区算，都能在 `.env` 里改：`NOTIFY_HUB_QUIET_HOURS=23:00-08:00`（写 `off` 关掉），`NOTIFY_HUB_DIGEST_TIME=18:00`（写 `off` 不自动发）。
+notify-hub 没有定时任务、免打扰和汇总，一被调用就发。「什么时候该打扰你」这类规则，放在最了解情况的程序里。比如 [邮件监控](https://github.com/yuhang2551/thunderbird-mail-agent/tree/main/monitor)：每小时检查一次邮件，要紧的马上推，其余的每天 8、12、18 点各合成一张汇总；夜里 23:00 到 8:00 只推紧急的；推不出去的，它自己留到下一次汇总。
 
-合成卡片和到点发汇总，要有人定时叫一下 notify-hub。最省事的是装上定时任务：
+notify-hub 也不存消息、不去重：同一件事推没推过，调用方自己记得（邮件监控按邮件记在自己的数据库里）。
+
+## 从 0.2 升级
+
+0.2 版自己有定时任务、免打扰、每日汇总和发件箱，0.3 起都去掉了，为什么见 [设计说明](docs/design.md)。0.3 里已经没有卸定时任务的命令，所以先用 0.2 把它卸掉，再升级：
 
 ```bash
-notify-hub schedule install     # 每天 08:00、12:00、18:00 各跑一次 notify-hub flush；macOS 用 launchd，装在你自己的用户下
-notify-hub schedule             # 看装没装、装的是什么时间、最近几行日志
-notify-hub schedule uninstall   # 卸掉，配置和发件箱都还在
+notify-hub flush
+notify-hub schedule uninstall
+uv tool upgrade notify-hub
+notify-hub version
+notify-hub test
 ```
 
-08:00 免打扰结束，把夜里攒下的合成一张卡发出去；18:00 发每日汇总；中午那次补发之前没发出去的。平常的通知来了就发，不等定时任务。时间能在 `.env` 里改，比如 `NOTIFY_HUB_SCHEDULE_TIMES=08:00,18:00`，改完再运行一次 `notify-hub schedule install`。改了免打扰或汇总的时间，也把新的时间写进去；`schedule install` 发现对不上会提醒。
+第一条把 0.2 发件箱里到时间该发的先发出去；`version` 应该显示 `notify-hub 0.3.0`。用过 `digest` 级别、想把还没汇总的也发掉，在第一条后面加一条 `notify-hub digest`。
 
-电脑睡着错过了，醒来后补跑一次：睡过了 18:00，醒来就发这一天的汇总；关机错过了，开机登录后补跑。不装也行，任何一次 `notify-hub send` 发成功后都会顺手做这些，只是可能晚一些。想马上看汇总：`notify-hub digest --preview` 只在终端里看，`notify-hub digest` 现在就发。
+- `.env` 里 0.2 的免打扰、汇总、定时任务、去重、限流配置项不再读，留着也没关系。
+- `~/.notify-hub/outbox.db` 和 `~/.notify-hub/logs/` 不再用，想删就删。
+- 调用时还传 `--key` 的，照样能用，只是不起作用。
+- 不小心先升级了：定时任务还会每天叫三次已经没有的 `flush`，什么也不做。在终端里运行下面两条就卸掉了：
+
+```bash
+launchctl bootout gui/$(id -u)/com.notify-hub.flush
+rm ~/Library/LaunchAgents/com.notify-hub.flush.plist
+```
 
 ## 接上 Claude Code
 
@@ -123,7 +144,7 @@ Claude Code 等你确认，或者回完话你一分钟没理它时，推到手�
 }
 ```
 
-这两种提醒，Claude Code 只在你像是离开了终端时才发，人在电脑前不会被打扰。卡片标题是「项目文件夹 · Claude Code 等你确认」，正文是 Claude Code 的提示。`notify-hub claude-hook` 的退出码永远是 0，推送出了问题也不会打断 Claude Code。
+这两种提醒，Claude Code 只在你像是离开了终端时才发，人在电脑前不会被打扰。卡片标题是「项目文件夹 · Claude Code 等你确认」，正文是 Claude Code 的提示。`notify-hub claude-hook` 只试一次、不重试，退出码永远是 0：推送出了问题，也不会拖慢或打断 Claude Code。
 
 用 `claude -p` 跑无人值守的长任务时，可以只给这一次运行加上 `Stop`：做完时推一条，正文是 Claude 最后一条回复的前 300 字。
 
@@ -137,36 +158,24 @@ claude -p "把这批实验跑完" --settings '{"hooks":{"Stop":[{"hooks":[{"type
 
 | 命令 | 作用 |
 |---|---|
-| `notify-hub status` | 看配置和发件箱：免打扰和汇总的设置、发了多少、有没有卡住的、最近的错误 |
-| `notify-hub flush` | 补上到时间该做的事：免打扰结束后合成卡片、到点发汇总、重发失败的、放弃重试超过一天的；定时任务跑的就是它 |
-| `notify-hub digest` | 现在就发每日汇总；加 `--preview` 只在终端里看 |
-| `notify-hub schedule` | 查看、装上（`install`）、卸掉（`uninstall`）定时任务 |
-| `notify-hub claude-hook` | 给 Claude Code 的 hooks 用，见上面 |
-| `notify-hub test` | 不经过发件箱，直接发一条测试消息 |
+| `notify-hub test` | 发一条测试消息，检查配置通不通 |
 | `notify-hub chats` | 列出机器人所在的群 |
 | `notify-hub init` | 生成配置文件，已经有了就不动 |
+| `notify-hub claude-hook` | 给 Claude Code 的 hooks 用，见上面 |
+| `notify-hub version` | 看装的是哪个版本 |
 
-## 少打扰，也不漏
+## 安全和隐私
 
-- **先落盘再发**：每条先写进 `~/.notify-hub/outbox.db`，发成功才算完。失败的过 1、5、15、30 分钟再试，之后每小时一次，一天还发不出去就放弃，`status` 里看得到原因。
-- **去重**：给了 `--key` 的，同一个 key 24 小时内只推一次；没给的，同一来源、同样的标题和正文 10 分钟内只推一次，防止脚本出 bug 循环刷屏。
-- **限流**：同一来源一小时最多推 20 条，超出的进汇总。
-- **链接只走按钮**：正文按纯文本显示，只有明确传的 `--link` 才变成按钮，按钮上写着网站域名。邮件之类的内容能影响模型写的摘要，这样钓鱼链接没法伪装成按钮。
-- **同时调用也不重复**：每条消息发之前先在数据库里认领，两个程序同时补发也不会把一条发两次。合成卡片在一个写锁事务里做，同时跑也只合出一张。
-- **合成的卡片也不会丢**：它本身就是发件箱里的一条消息，和普通消息一样排队、失败重发。
-- **卡片不会太大**：一张卡片列的条数有上限，内容太多就少列几条，写上「还有 N 条」，保证不超过 Lark 的大小限制。
-
-这些数字都能在 `.env` 里改。
-
-## 数据和隐私
-
-- 配置和发件箱都在 `~/.notify-hub/`，目录和文件只有你能读。秘密只放在 `.env` 里，不进仓库、不写进日志。
+- 配置在 `~/.notify-hub/.env`，目录和文件只有你能读。秘密只放在这里，不进仓库、不打印出来。
+- 不存消息：发完就退出，本机不留发过什么。
 - 发出去的只有调用方传进来的标题、正文和链接，只发给 Lark。接 Claude Code 的 `Stop` 时，会带上 Claude 最后一条回复的前 300 字。
-- 不开任何端口，也不常驻，Mac 上没有东西对外暴露。
+- 链接只走按钮：正文按纯文本显示，只有明确传的 `--link` 才变成按钮，按钮上写着网站域名。邮件之类的内容能影响模型写的摘要，这样钓鱼链接没法伪装成按钮。
+- 卡片不会太大：正文最多 3000 字，远低于 Lark 卡片消息 30 KB 的上限。
+- 不开任何端口，也不常驻，Mac 上没有东西对外暴露，也没有后台任务。
 
 ## 还没做
 
-邮件监控改成通过它推送（下一段）；卡片上的双向按钮，比如点「已处理」传回原来的程序。见 [更新记录](CHANGELOG.md)。
+卡片上的双向按钮，比如点「已处理」传回原来的程序。见 [更新记录](CHANGELOG.md)。
 
 ## 开发
 
@@ -175,4 +184,4 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/python -m pytest -q
 ```
 
-127 个测试，用假的 Lark 接口和假的时钟，不联网。设计说明见 [docs/design.md](docs/design.md)。
+88 个测试，用假的 Lark 接口，不联网。设计说明见 [docs/design.md](docs/design.md)。

@@ -12,7 +12,7 @@ from .models import Message
 
 
 class ChannelError(RuntimeError):
-    """发送失败。network=True 表示连不上（这时别接着发下一条，省得每条都等超时）。"""
+    """发送失败。network=True 表示连不上或 Lark 一时出错（5xx、429），隔几秒重试可能就好；其他错误（配置不对、没权限、收件方不对）重试也没用。"""
 
     def __init__(self, message: str, *, network: bool = False):
         super().__init__(message)
@@ -83,7 +83,7 @@ class LarkChannel:
         except httpx.HTTPError as exc:
             raise ChannelError(f"{what}：连不上 Lark（{exc.__class__.__name__}）", network=True) from exc
         if response.status_code >= 500 or response.status_code == 429:
-            # Lark 自己出问题或者嫌我们发太快：先停下，等下一次重试
+            # Lark 自己出问题或者嫌我们发太快：算暂时性的，hub 会隔几秒再试
             raise ChannelError(f"{what}：Lark 返回 HTTP {response.status_code}", network=True)
         try:
             data = response.json()

@@ -10,16 +10,17 @@ SOURCE_MAX = 40
 
 
 class Level(str, Enum):
-    URGENT = "urgent"  # 马上发，夜里也发
-    NORMAL = "normal"  # 马上发
-    DIGEST = "digest"  # 攒着，合成汇总再发
+    """级别只决定卡片的样子；两种都是收到就发，什么时候发由调用方决定。"""
+
+    URGENT = "urgent"  # 红色卡片
+    NORMAL = "normal"  # 蓝色卡片
 
     @classmethod
     def parse(cls, value: str | Level) -> Level:
         try:
             return cls(value)
         except ValueError:
-            raise ValueError(f"级别只能是 urgent、normal 或 digest，不是 {value!r}") from None
+            raise ValueError(f"级别只能是 urgent 或 normal，不是 {value!r}") from None
 
 
 @dataclass(frozen=True)
@@ -29,10 +30,7 @@ class Message:
     level: Level = Level.NORMAL
     source: str = "default"
     link: str | None = None
-    key: str | None = None
     created_at: float = 0.0
-    id: int | None = None
-    items: tuple[Message, ...] = ()  # 合并卡片（夜里攒下的、每日汇总）里的那些消息
 
 
 def make_message(
@@ -42,7 +40,6 @@ def make_message(
     level: str | Level = Level.NORMAL,
     source: str = "default",
     link: str | None = None,
-    key: str | None = None,
     created_at: float = 0.0,
 ) -> Message:
     """检查参数并整理成一条消息。参数不对抛 ValueError（这是调用方写错了，不是推送失败）。"""
@@ -60,7 +57,6 @@ def make_message(
         level=Level.parse(level),
         source=source,
         link=check_link(link),
-        key=(key or "").strip() or None,
         created_at=created_at,
     )
 

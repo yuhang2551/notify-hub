@@ -6,9 +6,25 @@ Recorded increment by increment: what each step added, how far it was verified, 
 
 ## Next
 
-1. Check step two on the Mac: see how the combined cards (dividers, several buttons) look in Lark, and install the three-times-a-day scheduled job.
-2. Switch the mail monitor to push through notify-hub and test it on the Mac (its own PR in the thunderbird-mail-agent repository).
-3. Later: two-way buttons on cards (tap "Done" or "Remind me later" and the answer goes back to the program that sent it).
+1. Upgrade the Mac to 0.3: remove the scheduled job with 0.2 first, then upgrade (the commands are under "Upgrading from 0.2" in the README), together with the new mail monitor (digests at 08:00, 12:00 and 18:00, only urgent mail at night).
+2. Later: two-way buttons on cards (tap "Done" or "Remind me later" and the answer goes back to the program that sent it).
+
+## 2026-10-28 · 0.3.0: a pure push tool
+
+- Why: 0.2 had its own scheduled job (08:00, 12:00 and 18:00 every day), quiet hours and daily digest, while the mail monitor had its own scheduled job and digest. The two timetables overlapped, and working out when a notification would arrive meant reading both sets of settings. Now notify-hub only sends right away and the caller owns all timing: the mail monitor decides when its digests go out and whether to push at night.
+- Removed: the outbox (SQLite), quiet hours, the daily digest, the `digest` level, deduplication, rate limits, the scheduled job, and the four commands `flush`, `digest`, `status` and `schedule`.
+- Kept: `send`, `test`, `chats`, `init`, `claude-hook` and `version`, the look of the cards, link buttons and the Python `notify()`. The two levels, `urgent` and `normal`, only set the card colour; both are sent at once.
+- When Lark cannot be reached or answers with a 5xx or 429, notify-hub retries on the spot after 2 seconds and again after 5. Errors such as wrong credentials or a missing permission are not retried.
+- Exit codes: 0 sent; 1 not sent (0.2 exited 0 here because it retried on its own); 2 bad arguments. In Python, `notify()` returns the number of attempts and raises `ChannelError` when the push fails.
+- `claude-hook` tries only once so Claude Code never waits for retries; it still always exits 0.
+- Compatibility: `--key` is still accepted and ignored; 0.2's settings in an old `.env` are no longer read and cause no errors; `outbox.db` and `logs/` are no longer used.
+- Upgrading means removing the scheduled job with 0.2 first (0.3 no longer has the `schedule` command); the README has the steps.
+- 88 tests: the outbox, quiet-hours, digest and schedule tests are gone, and new ones cover retries and exit codes.
+
+## 2026-10-27 · 0.2.1 checked on the Mac
+
+- The Mac was upgraded to 0.2.1 and the three-times-a-day scheduled job installed; the combined cards (dividers, several buttons) looked right in Lark.
+- The mail monitor switched to pushing through notify-hub (thunderbird-mail-agent PR #3, merged 2026-10-28), and `mail-monitor notify-test` got through on the Mac.
 
 ## 2026-10-27 · Step two follow-up: the scheduled job runs three times a day (0.2.1)
 
