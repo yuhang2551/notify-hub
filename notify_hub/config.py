@@ -3,16 +3,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, fields
-from datetime import time
 from pathlib import Path
 from typing import Any
 
 from dotenv import dotenv_values
 
-from .timing import Window, parse_daily, parse_times, parse_window
-
 DEFAULT_HOME = Path.home() / ".notify-hub"
 
+# 只读这几项。0.2 版的免打扰、汇总、定时任务、去重、限流那些配置项不再读，旧的 .env 里留着也没关系
 ENV_MAP = {
     "NOTIFY_HUB_HOME": "home",
     "NOTIFY_HUB_CHANNEL": "channel",
@@ -21,13 +19,6 @@ ENV_MAP = {
     "LARK_APP_SECRET": "lark_app_secret",
     "LARK_RECEIVE_ID": "lark_receive_id",
     "LARK_RECEIVE_ID_TYPE": "lark_receive_id_type",
-    "NOTIFY_HUB_RATE_LIMIT": "rate_limit",
-    "NOTIFY_HUB_DEDUP_MINUTES": "dedup_minutes",
-    "NOTIFY_HUB_KEY_HOURS": "key_hours",
-    "NOTIFY_HUB_GIVE_UP_HOURS": "give_up_hours",
-    "NOTIFY_HUB_QUIET_HOURS": "quiet_hours",
-    "NOTIFY_HUB_DIGEST_TIME": "digest_time",
-    "NOTIFY_HUB_SCHEDULE_TIMES": "schedule_times",
 }
 
 # init --from 时从别的 .env（比如邮件监控的）复制过来的项
@@ -45,33 +36,10 @@ class Settings:
     lark_app_secret: str | None = None
     lark_receive_id: str | None = None
     lark_receive_id_type: str | None = None  # 不填就按 id 前缀判断（oc_ 群、ou_ 个人）
-    rate_limit: int = 20  # 同一来源一小时最多推几条，超出的进汇总
-    dedup_minutes: int = 10  # 没给 key 时，同样的内容多少分钟内只推一次
-    key_hours: int = 24  # 给了 key 时，同一个 key 多少小时内只推一次
-    give_up_hours: int = 24  # 发不出去的消息重试多少小时后放弃
-    quiet_hours: str = "23:00-08:00"  # 免打扰时段：normal 先存着，结束后合成一张卡发；off 关掉
-    digest_time: str = "18:00"  # 每天几点发汇总；off 不自动发（还可以手动 notify-hub digest）
-    schedule_times: str = "08:00,12:00,18:00"  # 定时任务每天跑的时间（免打扰结束、中午、汇总）；改了要重新 schedule install
-
-    @property
-    def db_path(self) -> Path:
-        return self.home / "outbox.db"
 
     @property
     def env_path(self) -> Path:
         return self.home / ".env"
-
-    @property
-    def quiet_window(self) -> Window | None:
-        return parse_window(self.quiet_hours)
-
-    @property
-    def digest_at(self) -> time | None:
-        return parse_daily(self.digest_time)
-
-    @property
-    def schedule_at(self) -> list[time]:
-        return parse_times(self.schedule_times)
 
     def missing_lark(self, *, need_receiver: bool = True) -> list[str]:
         names = ["LARK_APP_ID", "LARK_APP_SECRET"] + (["LARK_RECEIVE_ID"] if need_receiver else [])
@@ -85,34 +53,14 @@ def env_file_path() -> Path:
     return home / ".env"
 
 
-_INT_FIELDS = {"rate_limit", "dedup_minutes", "key_hours", "give_up_hours"}
-
-
 def _coerce(field: str, raw: str) -> Any:
     value = raw.strip()
     if value == "":
         return None
     if field == "home":
         return Path(value).expanduser()
-    if field == "channel":
-        if value not in CHANNELS:
-            raise ValueError(f"只能是 {' 或 '.join(CHANNELS)}")
-        return value
-    if field == "quiet_hours":
-        return "off" if parse_window(value) is None else value
-    if field == "digest_time":
-        return "off" if parse_daily(value) is None else value
-    if field == "schedule_times":
-        parse_times(value)
-        return value
-    if field in _INT_FIELDS:
-        try:
-            number = int(value)
-        except ValueError:
-            raise ValueError("要写整数") from None
-        if number < 1:
-            raise ValueError("要大于 0")
-        return number
+    if field == "channel" and value not in CHANNELS:
+        raise ValueError(f"只能是 {' 或 '.join(CHANNELS)}")
     return value
 
 

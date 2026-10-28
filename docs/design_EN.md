@@ -2,86 +2,76 @@
 
 [中文](design.md) | **English**
 
-A one-page design written on 2026-10-27 and updated to match steps one and two as built. The [changelog](../CHANGELOG_EN.md) is the record of what is done and what is not.
+A one-page design written on 2026-10-27 and rewritten on 2026-10-28, when notify-hub became a pure push tool (0.3). The [changelog](../CHANGELOG_EN.md) is the record of what is done and what is not.
 
 ## The problem
 
-The mail monitor pushes to the phone, finished experiments push, failing scheduled jobs push, and Claude Code waiting for you could push too. If every program writes its own Lark push, each ends up with its own retries, deduplication and quiet hours, the rules drift apart, and Lark credentials end up in several places.
+The mail monitor pushes to the phone, finished experiments push, and Claude Code waiting for you could push too. If every program writes its own Lark push, Lark credentials end up in several places, and every program draws its cards and handles errors its own way.
 
-notify-hub pulls that layer out. A program only says what happened, how urgent it is and who is saying it; notify-hub decides how, when and whether to push.
+notify-hub pulls the "send it to Lark" layer out. A program only says what happened, how urgent it is and who is saying it; notify-hub turns that into a card and sends it to your phone right away.
+
+## It sends; it does not keep time
+
+In 0.2, notify-hub also kept time: an outbox, quiet hours, a daily digest and a scheduled job that ran three times a day. The mail monitor had its own scheduled job and digest as well, so there were two timetables: mail digests at 09:00 and 18:00, notify-hub's job at 08:00, 12:00 and 18:00, and night-time notifications held a second time inside notify-hub. Working out when a notification would arrive meant reading both sets of settings together.
+
+From 0.3 the split is:
+
+| | Responsible for |
+|---|---|
+| notify-hub | Sending now; retrying a couple of times on the spot; telling the caller when that fails |
+| The caller (the mail monitor, say) | When to check, when to send, whether to send at night, what to combine into a digest, what to do with a failed push |
+
+The timing rules live with the caller because only the caller knows whether a notification is worth waking you up for or can wait for the digest. A push tool does not know who sent a mail; it could only apply one blanket rule per level.
+
+How 0.2's outbox, quiet hours and digest worked is in the [0.2.1 design notes](https://github.com/yuhang2551/notify-hub/blob/e0ff774/docs/design_EN.md).
 
 ## How one message travels
 
 ```
 a program calls notify-hub send (or notify() in Python)
   │
-  ├─ bad arguments (unknown level, a link that is not http/https) → error, exit code 2
+  ├─ bad arguments (a level other than urgent or normal, a link that is not http/https, a source with spaces) → error, exit code 2
+  ├─ bad config (no App ID, an unknown channel) → error, exit code 1
   │
-  ├─ dedup: the same key within 24 hours, or the same content within 10 minutes → recorded as skipped, not sent
-  ├─ digest level → stored as digest for the daily digest
-  ├─ this source already pushed 20 in the last hour → stored as digest (rate limit)
-  ├─ normal during quiet hours → stored as held until quiet hours end
-  │
-  └─ written to the outbox (pending) → claimed (sending) → sent as a Lark card
-        ├─ success → sent; then runs one flush
-        └─ failure → back to pending, retried after 1, 5, 15, 30 minutes, then hourly; failed after a day
-
-notify-hub flush (from the scheduled job at 08:00, 12:00 and 18:00 every day, or after any successful send)
-  ├─ quiet hours are over → every held message is combined into one card
-  ├─ digest time has passed, this digest has not gone out, and it is not quiet hours → every digest message is combined into one digest card
-  └─ pending messages that are due (including the new cards) are sent; failures are retried as above
+  └─ rendered as a Lark card and sent
+        ├─ success → exit code 0
+        ├─ Lark unreachable, or a 5xx or 429 from Lark → try again after 2 s, then after 5 s
+        │     └─ all three attempts fail → exit code 1, with the reason on stderr
+        └─ any other error (wrong credentials, a missing permission, a wrong receiver) → no retry, exit code 1
 ```
-
-A combined card is a new message in the outbox (`kind = bundle`); the messages inside it become bundled and remember the card's id. When the card is sent, its members are read back and rendered.
 
 The key decisions:
 
 | Decision | Why |
 |---|---|
-| Write to the outbox before sending (the outbox pattern) | Offline, a Lark error or a crash loses nothing; `flush` picks up where it stopped |
-| A failed push still exits 0 | The caller (the mail monitor, say) should not stop its own work because a push failed |
-| Claim before sending | Two programs retrying at once never send the same message twice; a claim with no result after 5 minutes is treated as a crashed process |
-| Stop retrying once Lark is unreachable | Each message should not wait out its own timeout |
-| Dedup keys are scoped by source | Two programs that happen to use the same key do not interfere |
-| A combined card is itself a message in the outbox | Queuing, claiming and retrying all reuse the same code; combining happens in a write-locked transaction, so two processes flushing at once make only one card |
-| The digest asks "has it gone out since the latest digest time?" | If the computer slept through 18:00, the first flush after it wakes sends the digest, and it never goes out twice on one day. On first use it starts from the next digest time |
-| Times follow the computer's time zone | They match the clock you see; the tests pin the time zone and the clock, so they pass at night too |
-| Card size is measured in UTF-8 bytes | Lark caps card messages at 30 KB per request; with a lot of content, a card lists fewer entries and says how many more there are |
+| Store nothing; exit once sent | The caller knows best what to do with a failed push: the mail monitor keeps the mail for its next digest, an experiment script may just log a line. A second copy inside notify-hub would mean a second retry timetable |
+| A failed push exits 1 | The caller has to know a push failed to handle it. 0.2 exited 0 here because it retried on its own |
+| Only two retries on the spot (after 2 s and 5 s) | A network blip or an occasional 5xx from Lark is usually gone a few seconds later; a longer outage is the caller's business, and the caller is not kept waiting. The cost: if a request did reach Lark and only the reply was lost, the retry sends a second card. That is rare, and one card too many beats one too few |
+| Only temporary errors are retried | Wrong credentials, a missing permission or a wrong receiver stay wrong however often you try; failing at once saves time |
+| The two levels only set the card colour | Urgent is red, normal is blue. The caller decides when to send; the level no longer decides whether to send |
+| No deduplication | The caller remembers whether it already pushed something (the mail monitor records it per mail in its own database). 0.2's `--key` is still accepted and ignored, so old callers do not break |
+| The Claude Code hook tries once | Claude Code waits while a hook runs, so it must not wait for retries; the exit code is always 0, so it never interrupts Claude Code |
 | Plain-text body, links only as buttons | Mail content can sway the summaries a model writes; the button shows the domain, so a phishing link cannot pose as a button |
-| No daemon, no open port | It runs only when called; retries and digests are left to launchd. Nothing on the Mac is exposed |
-| The scheduled job runs only three times a day | Ordinary notifications go out as soon as they arrive; the job is only a backstop: once when quiet hours end, once at the digest time and once at noon for retries, so the background stays quiet. Every 10 minutes was too often |
-| Command line first, Python second | Any language, shell script, scheduled job or Claude Code hook can call it; the mail monitor calls the command too, so the two projects install separately and do not depend on each other |
+| The body is capped at 3,000 characters | A Chinese character takes 3 bytes, so this stays far below Lark's 30 KB limit for card messages; the request is encoded as UTF-8 directly, so Chinese text is not escaped into something longer |
+| No daemon, no open port, no background job | It runs only when called; nothing on the Mac is exposed |
+| Command line first, Python second | Any language, shell script or Claude Code hook can call it; the mail monitor calls the command too, so the two projects install separately and do not depend on each other |
 
-## Three levels
+## Two levels
 
-| Level | When it reaches the phone | Card color | Examples |
-|---|---|---|---|
-| urgent | At once, also at night | Red | Mail from an advisor or an interviewer, a service is down |
-| normal | At once; during quiet hours (23:00–08:00 by default) it waits, then goes out in one card with the others | Blue | An experiment finished, a new job match |
-| digest | Collected, combined per source once a day (18:00 by default) | Grey | Newsletters, daily stats |
-
-## Outbox states
-
-| State | Meaning |
-|---|---|
-| pending | Waiting to be sent: new, or waiting for its next retry |
-| sending | A process is sending it |
-| sent | Delivered |
-| held | A normal message that arrived during quiet hours, waiting to go into one card |
-| digest | Waiting for the daily digest (digest level, or rate-limited) |
-| bundled | Already combined into a card (`bundle_id` is that card) |
-| skipped | A duplicate, not sent |
-| failed | Retried for more than a day and dropped |
+| Level | Card | Examples |
+|---|---|---|
+| urgent | Red, with a red button | Mail from an advisor or an interviewer, a service is down |
+| normal | Blue | An experiment finished, a new job match, a mail digest |
 
 ## Configuration
 
-`~/.notify-hub/.env`; the folder and its files are readable only by you. Lark goes through an app bot (`LARK_APP_ID`, `LARK_APP_SECRET`, `LARK_RECEIVE_ID`), the same one the mail monitor uses, and `notify-hub init --from ~/.mail-monitor/.env` copies it over. The receiver type comes from the id's prefix (`oc_` a chat, `ou_` a person), so there is nothing else to fill in. Quiet hours and the digest time are `NOTIFY_HUB_QUIET_HOURS` and `NOTIFY_HUB_DIGEST_TIME`; `off` turns either off.
+`~/.notify-hub/.env`; the folder and its files are readable only by you. It holds only the channel and the Lark app bot (`LARK_APP_ID`, `LARK_APP_SECRET`, `LARK_RECEIVE_ID`), the same bot the mail monitor uses, and `notify-hub init --from ~/.mail-monitor/.env` copies it over. The receiver type comes from the id's prefix (`oc_` a chat, `ou_` a person), so there is nothing else to fill in. 0.2's settings can stay in the file; they are no longer read.
 
 ## Later
 
 - **Two-way buttons**: tap "Done" or "Remind me later" on a card and the answer goes back to the program that sent it. Lark's long-connection mode needs no public URL, and card button callbacks arrive over the same connection (see the [Hermes Agent Lark setup guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/feishu)); the cost is that notify-hub would have to keep running.
-- A local HTTP endpoint, routing sources to different chats, muting a source for a while, channels other than Lark.
+- A local HTTP endpoint, routing sources to different chats, channels other than Lark.
 
 ## Why not an existing tool
 
-Libraries such as Apprise can send a message to dozens of services, but they only send; ntfy and Bark need their own app. If you already live in Lark, what is missing is the layer of levels, deduplication, rate limits, retries and digests. That layer is also a set of standard engineering problems: the outbox pattern, idempotent deduplication, rate limiting and backoff retries.
+Libraries such as Apprise can send a message to dozens of services, and ntfy and Bark need their own app. Here only one channel is needed, a Lark app bot, plus cards and a few retries; a small tool of a few hundred lines covers that, every line of it is easy to follow, and the Lark credentials live in one place.

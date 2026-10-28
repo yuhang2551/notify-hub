@@ -12,7 +12,7 @@ def test_title_is_one_line_and_clipped():
 
 def test_defaults():
     msg = make_message("hi")
-    assert msg.level is Level.NORMAL and msg.source == "default" and msg.body == "" and msg.link is None and msg.key is None
+    assert msg.level is Level.NORMAL and msg.source == "default" and msg.body == "" and msg.link is None
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "\n"])
@@ -23,8 +23,9 @@ def test_empty_title_rejected(bad):
 
 def test_level_must_be_known():
     assert make_message("x", level="urgent").level is Level.URGENT
-    with pytest.raises(ValueError, match="urgent、normal 或 digest"):
-        make_message("x", level="loud")
+    for bad in ("loud", "digest"):  # 0.2 的汇总级别没有了
+        with pytest.raises(ValueError, match="urgent 或 normal"):
+            make_message("x", level=bad)
 
 
 def test_source_must_be_short_and_without_spaces():

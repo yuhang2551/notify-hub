@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "notify-hub"
-version = "0.2.1"
-description = "本机通知网关：各个程序调用同一个命令，按级别、去重、限流、失败重发的规则推到手机上的 Lark。"
+version = "0.3.0"
+description = "把通知推到手机上的 Lark：调用一次发一次，连不上当场重试，还发不出去就报错；什么时候发由调用方决定。"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

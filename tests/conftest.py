@@ -8,13 +8,14 @@ from notify_hub.hub import Hub
 
 
 class FakeChannel:
-    """记下发了什么；设置 fail_with 就让每次发送都抛这个异常。"""
+    """记下发了什么。fail_with 设了就每次都抛它；failures 里放异常，就按顺序先抛完这几个，再正常发。"""
 
     name = "fake"
 
     def __init__(self) -> None:
         self.sent = []
         self.fail_with: Exception | None = None
+        self.failures: list[Exception] = []
         self.calls = 0
         self.closed = False
 
@@ -22,24 +23,17 @@ class FakeChannel:
         self.calls += 1
         if self.fail_with is not None:
             raise self.fail_with
+        if self.failures:
+            raise self.failures.pop(0)
         self.sent.append(msg)
 
     def close(self) -> None:
         self.closed = True
 
 
-class Clock:
-    def __init__(self, t: float = 1_800_000_000.0):  # 2027-01-15 12:00（UTC+4）
-        self.t = t
+NOW = 1_800_000_000.0  # 2027-01-15 12:00（UTC+4）
 
-    def __call__(self) -> float:
-        return self.t
-
-    def advance(self, seconds: float) -> None:
-        self.t += seconds
-
-
-# 测试里的时区固定成 UTC+4（没有夏令时），Clock() 的起点是当地中午 12:00
+# 测试里的时区固定成 UTC+4（没有夏令时），卡片底部的时间才不随跑测试的机器变
 TEST_TZ = "GST-4"
 
 
@@ -63,17 +57,18 @@ def settings(tmp_path) -> Settings:
 
 
 @pytest.fixture
-def clock() -> Clock:
-    return Clock()
-
-
-@pytest.fixture
 def channel() -> FakeChannel:
     return FakeChannel()
 
 
 @pytest.fixture
-def hub(settings, channel, clock):
-    h = Hub(settings, channel=channel, clock=clock)
+def sleeps() -> list[float]:
+    """重试前本该等的秒数记在这里，测试不用真等。"""
+    return []
+
+
+@pytest.fixture
+def hub(settings, channel, sleeps):
+    h = Hub(settings, channel=channel, clock=lambda: NOW, sleep=sleeps.append)
     yield h
     h.close()

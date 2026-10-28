@@ -1,44 +1,54 @@
 import json
 import os
-import plistlib
 import stat
-import subprocess
-import sys
-import time
 
 import httpx
 import pytest
 from typer.testing import CliRunner
 
-from notify_hub import cli, launchd
+from notify_hub import cli
+from notify_hub import hub as hub_module
+from notify_hub.channels import ChannelError
 from notify_hub.cli import app, fill_env
 
 runner = CliRunner()
-
-
-@pytest.fixture(autouse=True)
-def real_clock_is_not_quiet(monkeypatch):
-    """命令行用的是真时间：关掉免打扰和定时汇总，测试在夜里跑结果也一样。要测它们的自己再打开。"""
-    monkeypatch.setenv("NOTIFY_HUB_QUIET_HOURS", "off")
-    monkeypatch.setenv("NOTIFY_HUB_DIGEST_TIME", "off")
 
 
 def _console(monkeypatch):
     monkeypatch.setenv("NOTIFY_HUB_CHANNEL", "console")
 
 
-def _window_around_now() -> str:
-    hour = time.localtime().tm_hour
-    return f"{(hour - 1) % 24:02d}:00-{(hour + 1) % 24:02d}:00"
+class FlakyLark:
+    """假的 Lark：先连不上 down 次，之后正常收。"""
+
+    name = "lark"
+
+    def __init__(self, down: int):
+        self.down = down
+        self.titles: list[str] = []
+
+    def send(self, msg) -> None:
+        self.titles.append(msg.title)
+        if len(self.titles) <= self.down:
+            raise ChannelError("发送消息：连不上 Lark（ConnectError）", network=True)
+
+    def close(self) -> None:
+        pass
 
 
-def test_send_prints_and_records(monkeypatch):
+def _flaky(monkeypatch, down: int) -> tuple[FlakyLark, list[float]]:
+    lark, slept = FlakyLark(down), []
+    monkeypatch.setattr(hub_module, "build_channel", lambda settings: lark)
+    monkeypatch.setattr(hub_module.time, "sleep", slept.append)
+    return lark, slept
+
+
+def test_send_prints_the_card_and_says_it_was_sent(monkeypatch):
     _console(monkeypatch)
     result = runner.invoke(app, ["send", "TimeFence 跑完了", "--body", "IC 0.031", "--source", "timefence"])
     assert result.exit_code == 0, result.output
-    assert "TimeFence 跑完了" in result.output and "✅ 已推送（#1）" in result.output
-    again = runner.invoke(app, ["send", "TimeFence 跑完了", "--body", "IC 0.031", "--source", "timefence"])
-    assert again.exit_code == 0 and "重复" in again.output
+    assert "🔵 TimeFence 跑完了" in result.output and "IC 0.031" in result.output
+    assert result.output.rstrip().endswith("✅ 已推送")
 
 
 def test_send_reads_body_from_stdin(monkeypatch):
@@ -48,25 +58,46 @@ def test_send_reads_body_from_stdin(monkeypatch):
     assert "🔴 备份失败" in result.output and "磁盘满了" in result.output
 
 
-def test_quiet_and_digest(monkeypatch):
+def test_quiet(monkeypatch):
     _console(monkeypatch)
-    quiet = runner.invoke(app, ["send", "安静", "-q"])
-    assert quiet.exit_code == 0 and "安静" in quiet.output and "已推送" not in quiet.output
-    digest = runner.invoke(app, ["send", "订阅 12 封", "--level", "digest"])
-    assert digest.exit_code == 0 and "进汇总" in digest.output
+    result = runner.invoke(app, ["send", "安静", "-q"])
+    assert result.exit_code == 0 and "安静" in result.output and "已推送" not in result.output
 
 
-def test_bad_arguments_exit_2(monkeypatch):
+@pytest.mark.parametrize("args", [["--level", "loud"], ["--level", "digest"], ["--link", "javascript:alert(1)"], ["--source", "my mail"]])
+def test_bad_arguments_exit_2(monkeypatch, args):
     _console(monkeypatch)
-    assert runner.invoke(app, ["send", "x", "--level", "loud"]).exit_code == 2
-    result = runner.invoke(app, ["send", "x", "--link", "javascript:alert(1)"])
-    assert result.exit_code == 2 and "http" in result.output
+    result = runner.invoke(app, ["send", "x", *args])
+    assert result.exit_code == 2 and "❌" in result.output
 
 
-def test_send_without_config_is_queued_not_an_error():
+def test_the_old_key_option_is_still_accepted(monkeypatch):
+    """0.2 版去重用的 --key 还能传，只是不起作用：旧的调用方不会因此报错。"""
+    _console(monkeypatch)
+    for _ in range(2):
+        result = runner.invoke(app, ["send", "面试邀请", "--key", "msg-1"])
+        assert result.exit_code == 0 and "✅ 已推送" in result.output
+    assert "--key" not in runner.invoke(app, ["send", "--help"]).output
+
+
+def test_send_without_config_exits_1():
     result = runner.invoke(app, ["send", "还没配好"])
-    assert result.exit_code == 0
-    assert "留在发件箱" in result.output and "LARK_APP_ID" in result.output
+    assert result.exit_code == 1
+    assert "❌ 没发出去" in result.output and "LARK_APP_ID" in result.output
+
+
+def test_send_retries_and_says_so(monkeypatch):
+    lark, slept = _flaky(monkeypatch, down=1)
+    result = runner.invoke(app, ["send", "网络抖了一下"])
+    assert result.exit_code == 0 and "✅ 已推送（试了 2 次）" in result.output
+    assert lark.titles == ["网络抖了一下"] * 2 and slept == [2]
+
+
+def test_send_gives_up_with_exit_1(monkeypatch):
+    lark, slept = _flaky(monkeypatch, down=99)
+    result = runner.invoke(app, ["send", "断网了"])
+    assert result.exit_code == 1 and "❌ 没发出去" in result.output and "连不上 Lark" in result.output
+    assert lark.titles == ["断网了"] * 3 and slept == [2, 5]
 
 
 def test_test_command(monkeypatch):
@@ -77,23 +108,27 @@ def test_test_command(monkeypatch):
     assert ok.exit_code == 0 and "你好" in ok.output and "已通过 console" in ok.output
 
 
-def test_status_and_flush(monkeypatch):
-    runner.invoke(app, ["send", "发不出去的"])  # 没配置：留在发件箱
-    status = runner.invoke(app, ["status"])
-    assert status.exit_code == 0
-    assert "还缺 LARK_APP_ID" in status.output and "等重发 1" in status.output and "发不出去的" in status.output
-    _console(monkeypatch)
-    status = runner.invoke(app, ["status"])
-    assert "console" in status.output
-    flush = runner.invoke(app, ["flush"])
-    assert flush.exit_code == 0 and "发出 0 条" in flush.output  # 还没到重试时间
-
-
-def test_bad_config_is_explained(tmp_path, monkeypatch):
+def test_bad_config_is_explained(tmp_path):
     env = tmp_path / "bad.env"
-    env.write_text("NOTIFY_HUB_RATE_LIMIT=many\n", encoding="utf-8")
+    env.write_text("NOTIFY_HUB_CHANNEL=email\n", encoding="utf-8")
     result = runner.invoke(app, ["--env", str(env), "send", "x"])
-    assert result.exit_code == 1 and "NOTIFY_HUB_RATE_LIMIT" in result.output
+    assert result.exit_code == 1 and "NOTIFY_HUB_CHANNEL" in result.output
+
+
+def test_an_old_env_file_still_works(tmp_path):
+    """0.2 的免打扰、汇总、限流配置还留在 .env 里也没关系：不读，照常马上发。"""
+    env = tmp_path / "old.env"
+    env.write_text(
+        "NOTIFY_HUB_CHANNEL=console\nNOTIFY_HUB_QUIET_HOURS=00:00-23:59\nNOTIFY_HUB_DIGEST_TIME=18:00\nNOTIFY_HUB_RATE_LIMIT=0\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["--env", str(env), "send", "照常发"])
+    assert result.exit_code == 0 and "照常发" in result.output and "✅ 已推送" in result.output
+
+
+@pytest.mark.parametrize("command", ["flush", "digest", "status", "schedule"])
+def test_the_scheduling_commands_are_gone(command):
+    assert runner.invoke(app, [command]).exit_code == 2
 
 
 def test_init_copies_lark_settings_without_printing_secrets(tmp_path):
@@ -111,7 +146,7 @@ def test_init_copies_lark_settings_without_printing_secrets(tmp_path):
     text = target.read_text(encoding="utf-8")
     assert "LARK_APP_ID=cli_abc\n" in text and "LARK_APP_SECRET=very-secret-value\n" in text and "LARK_RECEIVE_ID=oc_123\n" in text
     assert "# LARK_RECEIVE_ID_TYPE=\n" in text  # 源文件里注释掉的不复制
-    assert "MAIL_MONITOR_LLM" not in text
+    assert "MAIL_MONITOR_LLM" not in text and "QUIET_HOURS" not in text
 
     again = runner.invoke(app, ["init"])
     assert again.exit_code == 0 and "已存在" in again.output
@@ -156,86 +191,6 @@ def test_chats_without_credentials():
     assert result.exit_code == 1 and "LARK_APP_ID" in result.output
 
 
-def test_send_in_quiet_hours_waits(monkeypatch):
-    _console(monkeypatch)
-    monkeypatch.setenv("NOTIFY_HUB_QUIET_HOURS", _window_around_now())
-    result = runner.invoke(app, ["send", "夜里的"])
-    assert result.exit_code == 0 and result.output.startswith("🌙 免打扰时段")
-    assert runner.invoke(app, ["send", "急事", "--level", "urgent"]).output.startswith("────")
-    status = runner.invoke(app, ["status"]).output
-    assert "（现在是免打扰时段）" in status and "等免打扰结束 1" in status
-
-
-def test_digest_command(monkeypatch):
-    _console(monkeypatch)
-    assert "没有等着汇总" in runner.invoke(app, ["digest"]).output
-    runner.invoke(app, ["send", "订阅 12 封", "--level", "digest", "--source", "mail"])
-    preview = runner.invoke(app, ["digest", "--preview"])
-    assert "⚪ 每日汇总 · 1 条" in preview.output and "订阅 12 封" in preview.output and "已推送" not in preview.output
-    sent = runner.invoke(app, ["digest"])
-    assert sent.exit_code == 0 and "⚪ 每日汇总 · 1 条" in sent.output and "✅ 1 条合成一张汇总卡片" in sent.output
-    assert "没有等着汇总" in runner.invoke(app, ["digest"]).output
-    assert "每日汇总：不自动发" in runner.invoke(app, ["status"]).output
-
-
-def test_flush_quiet_prints_only_when_something_happened(monkeypatch):
-    _console(monkeypatch)
-    assert runner.invoke(app, ["flush", "-q"]).output == ""
-
-
-def test_schedule_on_other_systems_prints_cron_lines(monkeypatch):
-    monkeypatch.setattr(sys, "platform", "linux")
-    result = runner.invoke(app, ["schedule", "install"])
-    assert result.exit_code == 0 and "0 8,12,18 * * *" in result.output and "flush --quiet" in result.output
-    assert "每天 08:00、12:00、18:00" in result.output
-
-
-def test_schedule_on_a_mac(monkeypatch, tmp_path):
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(launchd.time, "sleep", lambda seconds: None)
-    calls = []
-
-    def fake_launchctl(args, **kwargs):
-        calls.append(args[1])
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(launchd.subprocess, "run", fake_launchctl)
-    assert "还没装" in runner.invoke(app, ["schedule"]).output
-    installed = runner.invoke(app, ["schedule", "install"])
-    assert installed.exit_code == 0 and "每天 08:00、12:00、18:00 运行" in installed.output, installed.output
-    assert "⚠️" not in installed.output
-    plist = tmp_path / "Library" / "LaunchAgents" / "com.notify-hub.flush.plist"
-    assert plist.exists()
-    status = runner.invoke(app, ["schedule", "status"]).output
-    assert "已装：每天 08:00、12:00、18:00（launchd 已加载）" in status and "不一样" not in status
-    assert "卸掉了" in runner.invoke(app, ["schedule", "uninstall"]).output
-    assert calls == ["bootout", "bootstrap", "print", "bootout"]
-    assert runner.invoke(app, ["schedule", "restart"]).exit_code == 2
-
-
-def test_schedule_status_spots_an_old_install(monkeypatch, tmp_path):
-    """0.2.0 装的是每 10 分钟一次：升级后看状态会提示重装。"""
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(launchd.subprocess, "run", lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""))
-    plist = launchd.plist_path()
-    plist.parent.mkdir(parents=True)
-    plist.write_bytes(plistlib.dumps({"Label": launchd.LABEL, "StartInterval": 600}))
-    status = runner.invoke(app, ["schedule"]).output
-    assert "已装：每 10 分钟" in status and "现在的配置是每天 08:00、12:00、18:00" in status
-    assert "再运行一次 notify-hub schedule install" in status
-
-
-def test_schedule_install_warns_when_the_digest_would_be_late(monkeypatch, tmp_path):
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("NOTIFY_HUB_DIGEST_TIME", "21:00")
-    monkeypatch.setattr(launchd.subprocess, "run", lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""))
-    installed = runner.invoke(app, ["schedule", "install"])
-    assert installed.exit_code == 0 and "每日汇总是 21:00" in installed.output and "NOTIFY_HUB_SCHEDULE_TIMES" in installed.output
-
-
 def test_claude_hook_command(monkeypatch):
     _console(monkeypatch)
     payload = {
@@ -252,4 +207,14 @@ def test_claude_hook_never_fails():
     assert runner.invoke(app, ["claude-hook"], input="not json").exit_code == 0
     assert runner.invoke(app, ["claude-hook"], input="").exit_code == 0
     stop = {"hook_event_name": "Stop", "last_assistant_message": "完成"}
-    assert runner.invoke(app, ["claude-hook"], input=json.dumps(stop)).exit_code == 0  # 没配置 Lark：留在发件箱，也是 0
+    result = runner.invoke(app, ["claude-hook"], input=json.dumps(stop))  # 没配置 Lark：说一句，退出码还是 0
+    assert result.exit_code == 0 and "LARK_APP_ID" in result.output
+
+
+def test_claude_hook_does_not_wait_to_retry(monkeypatch):
+    """hook 只试一次：连不上就算了，不让 Claude Code 等着重试。"""
+    lark, slept = _flaky(monkeypatch, down=99)
+    stop = {"hook_event_name": "Stop", "last_assistant_message": "完成"}
+    result = runner.invoke(app, ["claude-hook"], input=json.dumps(stop))
+    assert result.exit_code == 0 and "连不上 Lark" in result.output
+    assert len(lark.titles) == 1 and slept == []
