@@ -6,8 +6,14 @@ Recorded increment by increment: what each step added, how far it was verified, 
 
 ## Next
 
-1. Upgrade the Mac to 0.3: remove the scheduled job with 0.2 first, then upgrade (the commands are under "Upgrading from 0.2" in the README), together with the new mail monitor (digests at 08:00, 12:00 and 18:00, only urgent mail at night).
-2. Later: two-way buttons on cards (tap "Done" or "Remind me later" and the answer goes back to the program that sent it).
+1. Later: two-way buttons on cards (tap "Done" or "Remind me later" and the answer goes back to the program that sent it).
+
+## 2026-10-28 · 0.3.0 checked on the Mac
+
+- The Mac went from 0.2.1 to 0.3.0 in the order given under "Upgrading from 0.2" in the README: `flush` and `schedule uninstall` first, then `uv tool upgrade notify-hub`. Afterwards `launchctl list` no longer shows `com.notify-hub.flush`.
+- The mail monitor's `doctor` shows notify-hub 0.3.0; its scheduled job was reinstalled at the same time with hourly checks and digests at 08:00, 12:00 and 18:00 (thunderbird-mail-agent PR #6).
+- A few hours before the upgrade, the mail monitor's scheduled job pushed a real message through notify-hub (still 0.2.1 then) for the first time (10-28 12:37).
+- Not yet seen: the first card 0.3.0 sends from the scheduled job, which waits for the next mail worth pushing right away or the 18:00 digest.
 
 ## 2026-10-28 · 0.3.0: a pure push tool
 
